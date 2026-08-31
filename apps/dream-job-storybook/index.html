@@ -1,0 +1,1736 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MirAI塾 - 夢の職業絵本メーカー</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@400;700;900&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Zen Maru Gothic', sans-serif;
+            background-color: #f0f9ff;
+            background-image: radial-gradient(#e0f2fe 1px, transparent 1px);
+            background-size: 20px 20px;
+        }
+        .book-shadow {
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04), 5px 0 0 #3b82f6 inset;
+        }
+        .fade-in { animation: fadeIn 0.5s ease-in-out; }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .bounce { animation: bounce 2s infinite; }
+        @keyframes bounce {
+            0%, 100% { transform: translateY(-5%); }
+            50% { transform: translateY(0); }
+        }
+
+        /* --- めくり式ビューアー --- */
+        .page-turn-next { animation: turnNext 0.45s ease-out; }
+        .page-turn-prev { animation: turnPrev 0.45s ease-out; }
+        @keyframes turnNext {
+            0%   { opacity: 0; transform: perspective(1400px) rotateY(-28deg) translateX(14%); transform-origin: left center; }
+            100% { opacity: 1; transform: perspective(1400px) rotateY(0) translateX(0); transform-origin: left center; }
+        }
+        @keyframes turnPrev {
+            0%   { opacity: 0; transform: perspective(1400px) rotateY(28deg) translateX(-14%); transform-origin: right center; }
+            100% { opacity: 1; transform: perspective(1400px) rotateY(0) translateX(0); transform-origin: right center; }
+        }
+        .speaking-highlight { background: linear-gradient(transparent 62%, #fde68a 62%); }
+
+        /* --- 印刷 / PDF保存 --- */
+        .print-only { display: none; }
+        @media print {
+            @page { size: A4 portrait; margin: 14mm; }
+            body { background: #fff !important; background-image: none !important; }
+            .screen-only { display: none !important; }
+            .print-only { display: block !important; }
+            .print-page {
+                page-break-after: always;
+                break-after: page;
+                text-align: center;
+            }
+            .print-page:last-child { page-break-after: auto; break-after: auto; }
+            .print-page img { max-height: 148mm; width: auto; margin: 0 auto 8mm; }
+            .print-bmc-cell { break-inside: avoid; }
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useCallback } = React;
+
+        /* =====================================================================
+         * 1. アイコン（CDN依存を避けるためインライン定義）
+         * ===================================================================== */
+
+        const Icon = ({ children, className, ...props }) => (
+            <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="24" height="24" viewBox="0 0 24 24"
+                fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                className={className} {...props}
+            >
+                {children}
+            </svg>
+        );
+
+        const Book = (props) => <Icon {...props}><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" /></Icon>;
+        const Sparkles = (props) => <Icon {...props}><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L12 3Z" /><path d="M5 3v4" /><path d="M9 3v4" /><path d="M3 5h4" /><path d="M3 9h4" /></Icon>;
+        const Send = (props) => <Icon {...props}><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></Icon>;
+        const RefreshCw = (props) => <Icon {...props}><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" /><path d="M21 3v5h-5" /></Icon>;
+        const Heart = (props) => <Icon {...props}><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z" /></Icon>;
+        const Award = (props) => <Icon {...props}><circle cx="12" cy="8" r="7" /><polyline points="8.21 13.89 7 23 12 20 17 23 15.79 13.88" /></Icon>;
+        const Settings = (props) => <Icon {...props}><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" /><circle cx="12" cy="12" r="3" /></Icon>;
+        const ChevronLeft = (props) => <Icon {...props}><polyline points="15 18 9 12 15 6" /></Icon>;
+        const ChevronRight = (props) => <Icon {...props}><polyline points="9 18 15 12 9 6" /></Icon>;
+        const Volume2 = (props) => <Icon {...props}><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><path d="M15.54 8.46a5 5 0 0 1 0 7.07" /><path d="M19.07 4.93a10 10 0 0 1 0 14.14" /></Icon>;
+        const VolumeX = (props) => <Icon {...props}><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><line x1="23" y1="9" x2="17" y2="15" /><line x1="17" y1="9" x2="23" y2="15" /></Icon>;
+        const Printer = (props) => <Icon {...props}><polyline points="6 9 6 2 18 2 18 9" /><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" /><rect x="6" y="14" width="12" height="8" /></Icon>;
+        const Grid = (props) => <Icon {...props}><rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" /><rect x="14" y="14" width="7" height="7" /><rect x="3" y="14" width="7" height="7" /></Icon>;
+        const AlertTriangle = (props) => <Icon {...props}><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></Icon>;
+        const Key = (props) => <Icon {...props}><circle cx="7.5" cy="15.5" r="5.5" /><path d="m21 2-9.6 9.6" /><path d="m15.5 7.5 3 3L22 7l-3-3" /></Icon>;
+        const Check = (props) => <Icon {...props}><polyline points="20 6 9 17 4 12" /></Icon>;
+        const Save = (props) => <Icon {...props}><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" /><polyline points="17 21 17 13 7 13 7 21" /><polyline points="7 3 7 8 15 8" /></Icon>;
+        const Trash = (props) => <Icon {...props}><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></Icon>;
+
+        /* =====================================================================
+         * 2. Gemini 呼び出し層
+         *
+         *  この層だけがネットワークを知っている。将来サーバー側にキーを置く場合は
+         *  callGemini() の endpoint を自前の API ルート（例: /api/gemini）に差し替え、
+         *  apiKey の受け渡しを消せばよい。UI 側のコードは一切変更不要。
+         * ===================================================================== */
+
+        const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta';
+        const KEY_STORAGE = 'miraijuku.geminiApiKey';
+        const MODEL_STORAGE = 'miraijuku.geminiModels';
+
+        // 優先したいモデルID（上から順に、キーで実際に使えるものを採用する）
+        const TEXT_MODEL_PREFS = [
+            'gemini-2.5-flash',
+            'gemini-flash-latest',
+            'gemini-2.5-pro',
+            'gemini-2.0-flash',
+        ];
+        // 画像モデルは画質重視／速度重視の2系統。上から順に、キーで実際に使えるものを採用する。
+        const IMAGE_MODEL_PREFS = {
+            high: [
+                'gemini-3-pro-image',            // Nano Banana Pro：2K/4K、人物の同一性保持が最も強い
+                'gemini-3.1-flash-lite-image',
+                'gemini-2.5-flash-image',
+            ],
+            fast: [
+                'gemini-3.1-flash-lite-image',   // Nano Banana 2 Lite：速くて安い
+                'gemini-2.5-flash-image',
+                'gemini-3-pro-image',
+            ],
+        };
+        const DEFAULT_QUALITY = 'high';
+
+        const loadKey = () => {
+            try { return localStorage.getItem(KEY_STORAGE) || ''; } catch (e) { return ''; }
+        };
+        const saveKey = (v) => {
+            try { v ? localStorage.setItem(KEY_STORAGE, v) : localStorage.removeItem(KEY_STORAGE); } catch (e) { /* noop */ }
+        };
+        const loadModels = () => {
+            try { return JSON.parse(localStorage.getItem(MODEL_STORAGE) || 'null'); } catch (e) { return null; }
+        };
+        const saveModels = (v) => {
+            try { localStorage.setItem(MODEL_STORAGE, JSON.stringify(v)); } catch (e) { /* noop */ }
+        };
+
+        /* ---------------------------------------------------------------------
+         * 作った絵本の保存
+         *
+         *  挿絵をbase64で持つため1冊で数MBになる。localStorage の容量では
+         *  足りないので IndexedDB を使う。保存先はこの端末のブラウザの中だけ。
+         * ------------------------------------------------------------------- */
+
+        const DB_NAME = 'miraijuku';
+        const BOOK_STORE = 'books';
+
+        const openDb = () => new Promise((resolve, reject) => {
+            const req = indexedDB.open(DB_NAME, 1);
+            req.onupgradeneeded = () => {
+                const db = req.result;
+                if (!db.objectStoreNames.contains(BOOK_STORE)) {
+                    db.createObjectStore(BOOK_STORE, { keyPath: 'id' });
+                }
+            };
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+        });
+
+        const withBooks = async (mode, fn) => {
+            const db = await openDb();
+            return new Promise((resolve, reject) => {
+                const tx = db.transaction(BOOK_STORE, mode);
+                const req = fn(tx.objectStore(BOOK_STORE));
+                tx.oncomplete = () => resolve(req ? req.result : undefined);
+                tx.onerror = () => reject(tx.error);
+                tx.onabort = () => reject(tx.error);
+            });
+        };
+
+        const saveBook = (book) => withBooks('readwrite', (st) => st.put(book));
+        const listBooks = () => withBooks('readonly', (st) => st.getAll());
+        const removeBook = (id) => withBooks('readwrite', (st) => st.delete(id));
+
+        class GeminiError extends Error {
+            constructor(message, status) {
+                super(message);
+                this.status = status;
+            }
+        }
+
+        const readErrorMessage = async (res) => {
+            let detail = '';
+            try {
+                const body = await res.json();
+                detail = body?.error?.message || '';
+            } catch (e) { /* JSONでない場合は無視 */ }
+            return detail || `HTTP ${res.status}`;
+        };
+
+        // 生成系の共通POST
+        const callGemini = async (apiKey, model, body) => {
+            const res = await fetch(`${GEMINI_BASE}/models/${model}:generateContent`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-goog-api-key': apiKey,
+                },
+                body: JSON.stringify(body),
+            });
+            if (!res.ok) throw new GeminiError(await readErrorMessage(res), res.status);
+            return res.json();
+        };
+
+        // キーで実際に使えるモデル一覧を取得する。
+        // モデルIDは提供側の都合で変わるため、決め打ちせず毎回確認する。
+        const listModels = async (apiKey) => {
+            const res = await fetch(`${GEMINI_BASE}/models?pageSize=200`, {
+                headers: { 'x-goog-api-key': apiKey },
+            });
+            if (!res.ok) throw new GeminiError(await readErrorMessage(res), res.status);
+            const data = await res.json();
+            return (data.models || [])
+                .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
+                .map(m => String(m.name || '').replace(/^models\//, ''));
+        };
+
+        const pickModel = (prefs, available, fallbackFilter) => {
+            const hit = prefs.find(p => available.includes(p));
+            if (hit) return hit;
+            const loose = available.find(a => prefs.some(p => a.startsWith(p)));
+            if (loose) return loose;
+            return available.find(fallbackFilter) || null;
+        };
+
+        // 使うモデルを解決する（画像モデルが1つも無ければ image: null を返す）
+        const resolveModels = async (apiKey, quality = DEFAULT_QUALITY) => {
+            const available = await listModels(apiKey);
+            const isImage = (n) => n.includes('image') && !n.includes('embedding');
+            const prefs = IMAGE_MODEL_PREFS[quality] || IMAGE_MODEL_PREFS.high;
+            return {
+                text: pickModel(TEXT_MODEL_PREFS, available, (n) => n.includes('flash') && !isImage(n)),
+                image: pickModel(prefs, available, isImage),
+                quality,
+                available,
+            };
+        };
+
+        // JSONスキーマを指定してテキスト生成（構造化出力）
+        const generateJson = async (apiKey, model, { system, prompt, schema }) => {
+            const body = {
+                contents: [{ role: 'user', parts: [{ text: prompt }] }],
+                generationConfig: {
+                    responseMimeType: 'application/json',
+                    responseSchema: schema,
+                    temperature: 1.0,
+                },
+            };
+            if (system) body.systemInstruction = { parts: [{ text: system }] };
+
+            const data = await callGemini(apiKey, model, body);
+            const parts = data?.candidates?.[0]?.content?.parts || [];
+            const text = parts.map(p => p.text || '').join('').trim();
+            if (!text) {
+                const reason = data?.candidates?.[0]?.finishReason || data?.promptFeedback?.blockReason;
+                throw new GeminiError(`テキストが返りませんでした${reason ? `（${reason}）` : ''}`);
+            }
+            try {
+                return JSON.parse(text);
+            } catch (e) {
+                // スキーマ指定時はまず起きないが、前後に説明文が付いた場合の保険
+                const m = text.match(/\{[\s\S]*\}/);
+                if (m) return JSON.parse(m[0]);
+                throw new GeminiError('返ってきた内容をJSONとして読み取れませんでした');
+            }
+        };
+
+        // 画像生成。referenceImages を渡すとキャラクターの見た目を引き継げる。
+        // generationConfig の対応可否はモデルによって差があるため、
+        // 400 が返ったら設定を削りながら段階的に再試行する。
+        const generateImage = async (apiKey, model, { prompt, referenceImages = [], aspectRatio = '4:3', imageSize = '2K' }) => {
+            const parts = [{ text: prompt }];
+            referenceImages.forEach(img => {
+                parts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });
+            });
+
+            const variants = [
+                { responseModalities: ['TEXT', 'IMAGE'], imageConfig: { aspectRatio, imageSize } },
+                { responseModalities: ['TEXT', 'IMAGE'], imageConfig: { aspectRatio } },
+                { responseModalities: ['TEXT', 'IMAGE'] },
+                null,
+            ];
+
+            let lastError = null;
+            for (const generationConfig of variants) {
+                const body = { contents: [{ role: 'user', parts }] };
+                if (generationConfig) body.generationConfig = generationConfig;
+                try {
+                    const data = await callGemini(apiKey, model, body);
+                    const outParts = data?.candidates?.[0]?.content?.parts || [];
+                    const image = outParts.find(p => p.inlineData?.data);
+                    if (!image) {
+                        const reason = data?.candidates?.[0]?.finishReason || data?.promptFeedback?.blockReason;
+                        throw new GeminiError(`画像が返りませんでした${reason ? `（${reason}）` : ''}`);
+                    }
+                    return {
+                        mimeType: image.inlineData.mimeType || 'image/png',
+                        data: image.inlineData.data,
+                    };
+                } catch (e) {
+                    lastError = e;
+                    // 設定が原因の 400 のときだけ、設定を削って再試行する
+                    if (!(e instanceof GeminiError) || e.status !== 400) throw e;
+                }
+            }
+            throw lastError;
+        };
+
+        const toDataUrl = (img) => img ? `data:${img.mimeType};base64,${img.data}` : null;
+
+        // 同時実行数を制限しながら順不同で処理する。
+        // 10ページを1枚ずつ順番に描くと待ち時間が長すぎるが、
+        // 無制限に並列化するとレート制限に当たるため上限を設ける。
+        const mapWithConcurrency = async (items, limit, fn) => {
+            const results = new Array(items.length);
+            let cursor = 0;
+            const worker = async () => {
+                while (true) {
+                    const i = cursor++;
+                    if (i >= items.length) return;
+                    results[i] = await fn(items[i], i);
+                }
+            };
+            await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+            return results;
+        };
+
+        /* =====================================================================
+         * 3. プロンプトとスキーマ
+         * ===================================================================== */
+
+        const SAFETY_NOTE = `対象は未就学児〜小学生です。暴力・恐怖・差別・容姿へのからかい・お金の不安をあおる表現は使わないでください。
+特定の実在人物や実在ブランドは登場させないでください。実在の子どもの写真的な描写ではなく、あくまで絵本のキャラクターとして描いてください。`;
+
+        const DIAGNOSIS_SCHEMA = {
+            type: 'object',
+            properties: {
+                features: { type: 'string' },
+                job: { type: 'string' },
+                description: { type: 'string' },
+                strengths: { type: 'array', items: { type: 'string' } },
+            },
+            required: ['features', 'job', 'description', 'strengths'],
+        };
+
+        const buildDiagnosisPrompt = (userData) => {
+            const [dream, values, skill] = userData.answers;
+            return `次の子どもに、その子だけのオリジナルの職業（実在の職業名そのままではなく、その子の個性を表すわくわくする呼び名）を1つ考えてください。
+
+- なまえ：${userData.name}
+- 年齢：${userData.age}
+- やってみたいこと・夢：${dream}
+- 大切にしていること・大好きなこと：${values}
+- 得意なこと・ほめられること：${skill}
+
+出力する項目：
+- features: その子の特徴を、本人に語りかける口調で1〜2文にまとめる
+- job: オリジナルの職業名（15文字以内、わくわくする響き）
+- description: その職業がどんな仕事かを、子どもにわかる言葉で2文以内
+- strengths: その子の強みを短い言葉で3つ
+
+${SAFETY_NOTE}
+ひらがなを多めにし、むずかしい漢字にはふりがなを付けずに、やさしい言葉に言いかえてください。`;
+        };
+
+        const STORY_SCHEMA = {
+            type: 'object',
+            properties: {
+                title: { type: 'string' },
+                characterLook: { type: 'string' },
+                artStyle: { type: 'string' },
+                pages: {
+                    type: 'array',
+                    items: {
+                        type: 'object',
+                        properties: {
+                            text: { type: 'string' },
+                            scene: { type: 'string' },
+                        },
+                        required: ['text', 'scene'],
+                    },
+                },
+            },
+            required: ['title', 'characterLook', 'artStyle', 'pages'],
+        };
+
+        // 10ページ分のページ割り。何も指示しないと10ページが冗長になるため、
+        // 1ページ＝1つの出来事になるよう役割を固定する。
+        const PAGE_BEATS = [
+            '主人公の紹介。好きなこと・いつもしていることが伝わる日常の場面',
+            '「これが好き」という気持ちがはっきりする出来事',
+            'その道でがんばっている人や物に出会い、あこがれる',
+            '自分もやってみようと、はじめの一歩をふみ出す',
+            'うまくいって、うれしくなる小さな成功',
+            '大きな壁にぶつかる。うまくいかない',
+            'できないかもしれないと落ちこむ',
+            '得意なことを思い出し、自分のやり方でやってみる',
+            '乗りこえて、まわりの人が笑顔になる。職業として花ひらく',
+            '読んでいる子へのメッセージで終わる',
+        ];
+
+        const buildStoryPrompt = (userData, result, pageCount) => {
+            const genderLabel = userData.gender === 'boy' ? '男の子' : (userData.gender === 'girl' ? '女の子' : '子ども');
+            const [dream, values, skill] = userData.answers;
+            const beats = PAGE_BEATS.slice(0, pageCount)
+                .map((b, i) => `  ${i + 1}ページめ：${b}`).join('\n');
+
+            return `${userData.name}（${userData.age}歳・${genderLabel}）が主人公の絵本を作ってください。
+
+主人公の設定：
+- 夢：${dream}
+- 大切にしていること：${values}
+- 得意なこと：${skill}
+- 将来なる職業：「${result.job}」（${result.description}）
+
+全${pageCount}ページ。各ページの役割は次のとおりです。
+${beats}
+
+物語の条件：
+- 1ページに出来事は1つだけ。次のページへ気持ちがつながるように書く
+- つまずきは「${skill}」という得意なことで乗りこえる
+- 各ページの text は2〜4文。声に出して読んで気持ちよいリズムにする
+- 主人公の呼び方は本文中で一貫させる
+
+出力する項目：
+- title: 絵本のタイトル（20文字以内）
+- characterLook: 主人公の見た目を、挿絵を描く人に伝えるつもりで具体的に書く。
+  髪型・髪色・目の色・服の形と色・靴・体型・いつも持っているもの・表情の癖を必ず入れる。
+  全${pageCount}ページで同じ姿にするための設定なので、他の子と間違えようのない特徴を含める
+- artStyle: 絵本全体の画風を1文で。画材（水彩・色鉛筆など）、色の傾向、線の太さにふれる
+- pages: 各ページの text（本文）と scene（挿絵に描く情景を、
+  場所・時間帯・主人公の動作と表情・まわりに何があるかがわかるように1〜2文で）
+
+${SAFETY_NOTE}`;
+        };
+
+        const buildCharacterSheetPrompt = (story) => `絵本の主人公の「キャラクター設定画」を1枚描いてください。
+
+キャラクター：${story.characterLook}
+画風：${story.artStyle}
+
+条件：
+- 同じ1人のキャラクターを、横に並べて3つの姿で描く：
+  (1) 正面の全身、まっすぐ立ってにっこり笑った顔
+  (2) 横向きの全身
+  (3) 顔のアップ（バストアップ）
+- 3つとも髪型・髪色・目の色・服・靴をまったく同じにする
+- 背景は無地の白。文字・ロゴ・枠線・番号は一切入れない
+- 子ども向け絵本の挿絵の画風で、やわらかく親しみやすい線と色
+- 実在の人物の写真的な描写にはせず、絵本のキャラクターとして描く
+
+これは以降の全ページで見た目をそろえるための基準画です。特徴がはっきり見えるように描いてください。`;
+
+        const buildPageImagePrompt = (story, page, index, total) => `絵本の挿絵を1枚描いてください。
+
+添付した1枚目は主人公のキャラクター設定画です。主人公の顔立ち・髪型・髪色・目の色・服・靴を、
+設定画とまったく同じにしてください。2枚目がある場合は、その絵の画風・色づかい・線の太さに合わせてください。
+
+絵本のタイトル：${story.title}
+このページ（${index + 1}/${total}）の場面：${page.scene}
+画風：${story.artStyle}
+
+条件：
+- 場面全体が伝わる一枚絵にする。背景・時間帯・天気まで描きこむ
+- 主人公の表情と動作で、そのページの気持ちが伝わるようにする
+- 文字・セリフ・吹き出し・ページ番号・枠線は画像に入れない
+- 見開きの絵本として印刷しても耐えるよう、細部まで丁寧に仕上げる
+- 明るく安心感のある色づかいにする`;
+
+        // --- ビジネスモデルキャンバス（子ども向け起業教材版） ---
+        // 9ブロックの並びは標準のBMCレイアウトに合わせている。
+        const BMC_BLOCKS = [
+            { key: 'partners',     kid: 'だれとやる？',        formal: 'パートナー',       color: 'bg-purple-50 border-purple-200 text-purple-800', hint: 'いっしょにやってくれる人や、たすけてくれる人' },
+            { key: 'activities',   kid: 'まいにち なにをする？', formal: '主な活動',         color: 'bg-indigo-50 border-indigo-200 text-indigo-800', hint: 'この仕事でいちばんがんばること' },
+            { key: 'resources',    kid: 'なにが ひつよう？',    formal: '必要なもの',       color: 'bg-blue-50 border-blue-200 text-blue-800',       hint: 'どうぐ、ばしょ、とくいなちから' },
+            { key: 'value',        kid: 'どんな うれしさ？',    formal: '届ける価値',       color: 'bg-amber-50 border-amber-300 text-amber-800',    hint: 'お客さんが「うれしい！」と思うこと' },
+            { key: 'relationship', kid: 'どうやって なかよくなる？', formal: 'お客さんとの関係', color: 'bg-rose-50 border-rose-200 text-rose-800',   hint: 'また来たいと思ってもらうくふう' },
+            { key: 'channels',     kid: 'どうやって とどける？',  formal: '届け方',           color: 'bg-teal-50 border-teal-200 text-teal-800',       hint: 'お店、インターネット、イベントなど' },
+            { key: 'customers',    kid: 'だれを よろこばせる？',  formal: 'お客さん',         color: 'bg-green-50 border-green-200 text-green-800',    hint: 'この仕事でしあわせにする人' },
+            { key: 'costs',        kid: 'なにに お金がかかる？',  formal: 'かかるお金',       color: 'bg-slate-50 border-slate-300 text-slate-700',    hint: 'ざいりょう代、どうぐ代など' },
+            { key: 'revenue',      kid: 'どうやって お金をもらう？', formal: 'もらえるお金',   color: 'bg-orange-50 border-orange-300 text-orange-800', hint: 'なにと引きかえにお金をいただくか' },
+        ];
+
+        const BMC_SCHEMA = {
+            type: 'object',
+            properties: {
+                summary: { type: 'string' },
+                firstStep: { type: 'string' },
+                ...Object.fromEntries(BMC_BLOCKS.map(b => [
+                    b.key,
+                    { type: 'array', items: { type: 'string' } },
+                ])),
+            },
+            required: ['summary', 'firstStep', ...BMC_BLOCKS.map(b => b.key)],
+        };
+
+        const buildBmcPrompt = (userData, result, story) => `子ども向けの起業の学びとして、下の「夢の職業」をお仕事として成り立たせるための考えを整理してください。
+
+- こどもの名前：${userData.name}（${userData.age}歳）
+- 夢の職業：「${result.job}」
+- どんな仕事か：${result.description}
+- 得意なこと：${userData.answers[2]}
+- 大切にしていること：${userData.answers[1]}
+- 絵本のタイトル：${story?.title || '（未作成）'}
+
+これはビジネスモデルキャンバスの9つのマスです。それぞれ**2〜3個**、短い文で書いてください。
+${BMC_BLOCKS.map(b => `- ${b.key}（${b.kid} / ${b.formal}）：${b.hint}`).join('\n')}
+
+さらに：
+- summary: このお仕事がうまくいく理由を、子どもに向けて2文で
+- firstStep: 明日からできる小さな一歩を1つ、具体的に
+
+書き方の条件：
+- 小学生が声に出して読める、やさしい言葉にする
+- 1つの項目は25文字くらいまで
+- 「〜する」「〜な人」のように、そのまま付せんに書ける短さにする
+${SAFETY_NOTE}`;
+
+        /* =====================================================================
+         * 4. APIキーが無いときのフォールバック（キーワード診断・ひな形ストーリー）
+         *    キー未設定でも今までどおり診断とテキスト絵本まで使えるようにしておく。
+         * ===================================================================== */
+
+        const JOB_RULES = [
+            { re: /動物|犬|猫|ペット|生き物/,            job: 'あたたかい命の守護者（ガーディアン）', tpl: (s, v) => `得意な「${s}」を使って動物たちと心を通わせ、世界中に「${v}」の輪を広げる、とっても優しいお仕事です。` },
+            { re: /植物|花|森|木|自然/,                  job: '緑のささやきを聞く魔法使い',           tpl: (s, v) => `「${s}」で植物たちを元気にし、世界を「${v}」で満たす、森や花と仲良しなお仕事です。` },
+            { re: /絵|描く|デザイン|色|美術|アート/,      job: '虹色世界の魔法使い',                   tpl: (s, v) => `あなたの「${s}」で描く絵が動き出し、見た人みんなに「${v}」という感動をプレゼントする、夢のようなお仕事です。` },
+            { re: /髪|ヘア|美容師|床屋|カット/,          job: '魔法のハサミのヘアスタイリスト',       tpl: (s, v) => `「${s}」というセンスで、ハサミを一振りするたびにみんなを「${v}」な笑顔に変身させるお仕事です。` },
+            { re: /服|ファッション|おしゃれ|ドレス/,      job: 'キラキラドレスの仕立て屋さん',         tpl: (s, v) => `「${s}」を縫い合わせて、着るだけで「${v}」な気分になれる素敵な服を作るお仕事です。` },
+            { re: /ゲーム|パソコン|コード|ロボット|プログラミング/, job: 'デジタルワールドの建築家',   tpl: (s, v) => `「${s}」を駆使して新しい世界を作り、「${v}」あふれる楽しい冒険をみんなに届けるお仕事です。` },
+            { re: /料理|食べる|お菓子|ケーキ|パン|ごはん/, job: '幸せ味の錬金術師',                    tpl: (s, v) => `「${s}」という隠し味を使って、一口食べれば「${v}」な気持ちになれる魔法の料理を発明するお仕事です。` },
+            { re: /宇宙|星|空|ロケット|月/,              job: '銀河のパイオニア',                     tpl: (s, v) => `「${s}」をエネルギーに変えてロケットを飛ばし、宇宙の果てまで「${v}」を伝えに行く壮大なお仕事です。` },
+            { re: /乗り物|車|電車|飛行機|運転/,          job: '空と陸の冒険キャプテン',               tpl: (s, v) => `「${s}」という羅針盤を持って、みんなを「${v}」という素晴らしい場所へ連れて行くお仕事です。` },
+            { re: /助ける|病気|病院|薬|看護/,            job: '奇跡を起こすヒーラー',                 tpl: (s, v) => `「${s}」というパワーで病気を治し、みんなの心に「${v}」という光を灯す、ヒーローのようなお仕事です。` },
+            { re: /守る|警察|正義|平和/,                 job: '街の平和を守るブレイブ・ヒーロー',     tpl: (s, v) => `強い「${s}」と勇気で、「${v}」を守り抜き、みんなが安心して暮らせる街を作るお仕事です。` },
+            { re: /走る|スポーツ|ボール|運動|サッカー|野球/, job: '風を切るスーパースター',            tpl: (s, v) => `「${s}」を武器に誰よりも輝き、その姿で世界中の人々に「${v}」という勇気を与えるお仕事です。` },
+            { re: /歌|音楽|ピアノ|ダンス|楽器/,          job: '魂を揺さぶるメロディメーカー',         tpl: (s, v) => `「${s}」のリズムに乗せて、聴く人すべての心に「${v}」を響かせる、素敵な表現者です。` },
+            { re: /本|物語|書く|言葉/,                   job: '物語の織り人（ストーリーウィーバー）', tpl: (s, v) => `「${s}」というペンで、「${v}」がテーマの物語を紡ぎ、読んだ人を幸せな世界へ連れて行くお仕事です。` },
+            { re: /教える|先生|勉強|学校/,               job: '未来の種を育てるガーデナー',           tpl: (s, v) => `「${s}」を使って子供たちの才能を開花させ、「${v}」あふれる未来を一緒に作るお仕事です。` },
+            { re: /実験|科学|研究|発見/,                 job: '不思議発見の探検家',                   tpl: (s, v) => `「${s}」を頼りに世界の謎を解き明かし、「${v}」につながる大発見をするお仕事です。` },
+            { re: /家|建物|作る|大工/,                   job: '夢のお城を建てるマエストロ',           tpl: (s, v) => `「${s}」を積み上げて、みんなが「${v}」を感じながら暮らせる、素敵な空間を作るお仕事です。` },
+            { re: /笑う|面白い|芸人|テレビ/,             job: '世界を照らす笑顔の魔法使い',           tpl: (s, v) => `あなたの「${s}」で世界中を笑わせ、「${v}」というハッピーな空気を届けるお仕事です。` },
+        ];
+
+        const determineJobLocally = (inputs) => {
+            const [interest, value, skill] = inputs;
+            const text = inputs.join(' ').toLowerCase();
+            const rule = JOB_RULES.find(r => r.re.test(text));
+
+            return {
+                features: `「${interest}」が大好きで、「${value}」を何より大切にする優しい心と、「${skill}」という素晴らしい才能を持っています！`,
+                job: rule ? rule.job : '未来のドリーム・イノベーター',
+                description: rule
+                    ? rule.tpl(skill, value)
+                    : `あなただけの「${skill}」と「${interest}」への情熱を組み合わせて、世界に「${value}」という新しい風を吹かせるお仕事です。`,
+                strengths: [interest, value, skill],
+            };
+        };
+
+        const honorific = (gender) => gender === 'girl' ? 'ちゃん' : (gender === 'boy' ? 'くん' : 'さん');
+
+        // キーが無いときの、挿絵なしのひな形ストーリー
+        const buildLocalStory = (userData, result) => {
+            const name = userData.name;
+            const s = honorific(userData.gender);
+            const values = userData.answers[1];
+            const skill = userData.answers[2];
+            const kid = userData.gender === 'boy' ? '男の子' : (userData.gender === 'girl' ? '女の子' : '子ども');
+
+            return {
+                title: `${name}${s}と「${result.job}」のまほう`,
+                characterLook: '',
+                artStyle: '',
+                offline: true,
+                pages: [
+                    { text: `むかしむかし、あるところに ${userData.age}歳の元気な${kid}、${name}${s}がいました。`, scene: '' },
+                    { text: `${name}${s}は「${values}」ことが 大すきでした。`, scene: '' },
+                    { text: `ある日、${name}${s}は「${result.job}」という おしごとを 知りました。\n「すてきだなあ」`, scene: '' },
+                    { text: `${name}${s}は、いつか「${result.job}」に なることを 夢見るように なりました。`, scene: '' },
+                    { text: `さっそく やってみると、思ったより うまくいきました。\nうれしくて、もっと やりたくなりました。`, scene: '' },
+                    { text: `でも ある日、${name}${s}の前に 大きなかべが 立ちはだかりました。`, scene: '' },
+                    { text: `「わたしには むりかもしれない…」\n${name}${s}は しょんぼりしました。`, scene: '' },
+                    { text: `そのとき、${name}${s}は 思い出しました。\n自分には「${skill}」という とくいなことが あることを。`, scene: '' },
+                    { text: `${name}${s}は 自分のやりかたで かべを のりこえました。\n「ありがとう、${name}${s}！」みんなの こえが ひびきます。`, scene: '' },
+                    { text: `${name}${s}へ。\nあなたの すきなことは、きっと だれかを しあわせにするよ。`, scene: '' },
+                ],
+            };
+        };
+
+        /* =====================================================================
+         * 5. 共通UI
+         * ===================================================================== */
+
+        const ErrorBanner = ({ message, onClose }) => {
+            if (!message) return null;
+            return (
+                <div className="bg-red-50 border-2 border-red-200 text-red-700 rounded-xl p-4 mb-4 flex items-start gap-3 text-sm text-left">
+                    <AlertTriangle className="w-5 h-5 flex-shrink-0 mt-0.5" />
+                    <div className="flex-1 break-words">{message}</div>
+                    {onClose && (
+                        <button onClick={onClose} className="text-red-400 hover:text-red-600 font-bold px-1" aria-label="閉じる">×</button>
+                    )}
+                </div>
+            );
+        };
+
+        // APIキーとモデルの設定パネル。
+        // モデルIDは提供側で入れ替わるため、キーで実際に使えるものを取得して選ばせる。
+        const SettingsModal = ({ open, onClose, apiKey, models, onSave }) => {
+            const [draftKey, setDraftKey] = useState(apiKey);
+            const [available, setAvailable] = useState(null);
+            const [draftModels, setDraftModels] = useState(models);
+            const [checking, setChecking] = useState(false);
+            const [error, setError] = useState('');
+
+            useEffect(() => {
+                if (open) {
+                    setDraftKey(apiKey);
+                    setDraftModels(models);
+                    setError('');
+                }
+            }, [open, apiKey, models]);
+
+            if (!open) return null;
+
+            const handleCheck = async () => {
+                setChecking(true);
+                setError('');
+                try {
+                    const quality = draftModels.quality || DEFAULT_QUALITY;
+                    const resolved = await resolveModels(draftKey.trim(), quality);
+                    setAvailable(resolved.available);
+                    setDraftModels({ text: resolved.text, image: resolved.image, quality });
+                    if (!resolved.text) setError('このキーで使えるテキスト生成モデルが見つかりませんでした。');
+                } catch (e) {
+                    setAvailable(null);
+                    setError(`確認できませんでした：${e.message}`);
+                } finally {
+                    setChecking(false);
+                }
+            };
+
+            const handleSave = () => {
+                onSave(draftKey.trim(), draftModels);
+                onClose();
+            };
+
+            const imageModels = (available || []).filter(n => n.includes('image'));
+            const textModels = (available || []).filter(n => !n.includes('image'));
+
+            return (
+                <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 overflow-y-auto">
+                    <div className="bg-white rounded-3xl max-w-lg w-full p-6 my-8 fade-in">
+                        <h3 className="text-lg font-bold text-gray-800 mb-1 flex items-center gap-2">
+                            <Key className="w-5 h-5 text-blue-500" /> Gemini APIキーの設定
+                        </h3>
+                        <p className="text-xs text-gray-500 mb-4 leading-relaxed">
+                            キーはこの端末のブラウザ（localStorage）にだけ保存され、Google以外には送信されません。
+                            共用のパソコンでは、使い終わったら「削除」を押してください。
+                        </p>
+
+                        <ErrorBanner message={error} onClose={() => setError('')} />
+
+                        <label className="block text-sm font-bold text-gray-700 mb-1">APIキー</label>
+                        <input
+                            type="password"
+                            value={draftKey}
+                            onChange={(e) => setDraftKey(e.target.value)}
+                            placeholder="AIza..."
+                            autoComplete="off"
+                            className="w-full border-2 border-gray-200 rounded-xl px-4 py-3 mb-2 focus:outline-none focus:border-blue-400"
+                        />
+                        <p className="text-xs text-gray-500 mb-4">
+                            キーは <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" className="text-blue-600 underline">Google AI Studio</a> で無料で作成できます。
+                        </p>
+
+                        <label className="block text-sm font-bold text-gray-700 mb-1">挿絵の画質</label>
+                        <div className="grid grid-cols-2 gap-2 mb-2">
+                            {[
+                                { v: 'high', label: '高画質', note: 'Nano Banana Pro。人物の同一性が最も安定します' },
+                                { v: 'fast', label: '速度優先', note: 'Nano Banana 2 Lite。速くて安く仕上がります' },
+                            ].map(o => (
+                                <button
+                                    key={o.v}
+                                    onClick={() => setDraftModels(m => ({ ...m, quality: o.v }))}
+                                    className={`border-2 rounded-xl px-3 py-2 text-left ${
+                                        (draftModels.quality || DEFAULT_QUALITY) === o.v
+                                            ? 'bg-blue-50 border-blue-400'
+                                            : 'border-gray-200 hover:bg-gray-50'
+                                    }`}
+                                >
+                                    <span className="block font-bold text-sm text-gray-800">{o.label}</span>
+                                    <span className="block text-[11px] text-gray-500 leading-snug mt-0.5">{o.note}</span>
+                                </button>
+                            ))}
+                        </div>
+                        <p className="text-xs text-gray-500 mb-4">
+                            絵本1冊につき挿絵を{PAGE_COUNT + 1}枚生成します（設定画1枚＋本文{PAGE_COUNT}ページ）。
+                            高画質は1枚あたりの単価が上がるため、教室でまとめて使う場合は利用上限の設定をおすすめします。
+                        </p>
+
+                        <button
+                            onClick={handleCheck}
+                            disabled={!draftKey.trim() || checking}
+                            className="w-full bg-blue-500 hover:bg-blue-600 disabled:bg-gray-300 text-white font-bold py-3 rounded-xl mb-4 flex items-center justify-center gap-2"
+                        >
+                            {checking ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Check className="w-5 h-5" />}
+                            {checking ? '確認中...' : '使えるモデルを確認する'}
+                        </button>
+
+                        {available && (
+                            <div className="space-y-3 mb-4 fade-in">
+                                <div>
+                                    <label className="block text-sm font-bold text-gray-700 mb-1">文章づくりのモデル</label>
+                                    <select
+                                        value={draftModels.text || ''}
+                                        onChange={(e) => setDraftModels(m => ({ ...m, text: e.target.value }))}
+                                        className="w-full border-2 border-gray-200 rounded-xl px-3 py-2 bg-white"
+                                    >
+                                        {textModels.map(n => <option key={n} value={n}>{n}</option>)}
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-bold text-gray-700 mb-1">挿絵のモデル</label>
+                                    <select
+                                        value={draftModels.image || ''}
+                                        onChange={(e) => setDraftModels(m => ({ ...m, image: e.target.value || null }))}
+                                        className="w-full border-2 border-gray-200 rounded-xl px-3 py-2 bg-white"
+                                    >
+                                        <option value="">挿絵なし（文章だけ）</option>
+                                        {imageModels.map(n => <option key={n} value={n}>{n}</option>)}
+                                    </select>
+                                    {imageModels.length === 0 && (
+                                        <p className="text-xs text-amber-600 mt-1">
+                                            画像生成に対応したモデルが見つかりませんでした。文章だけの絵本になります。
+                                        </p>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+
+                        <div className="flex gap-3">
+                            <button onClick={onClose} className="flex-1 border-2 border-gray-200 text-gray-500 font-bold py-3 rounded-xl hover:bg-gray-50">
+                                とじる
+                            </button>
+                            {apiKey && (
+                                <button
+                                    onClick={() => { onSave('', { text: null, image: null, quality: DEFAULT_QUALITY }); onClose(); }}
+                                    className="px-4 border-2 border-red-200 text-red-500 font-bold py-3 rounded-xl hover:bg-red-50"
+                                >
+                                    削除
+                                </button>
+                            )}
+                            <button
+                                onClick={handleSave}
+                                disabled={!draftKey.trim()}
+                                className="flex-1 bg-green-500 hover:bg-green-600 disabled:bg-gray-300 text-white font-bold py-3 rounded-xl"
+                            >
+                                保存する
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        /* =====================================================================
+         * 6. 読み上げ
+         * ===================================================================== */
+
+        const useSpeech = () => {
+            const [speaking, setSpeaking] = useState(false);
+            const supported = typeof window !== 'undefined' && 'speechSynthesis' in window;
+
+            const stop = useCallback(() => {
+                if (!supported) return;
+                window.speechSynthesis.cancel();
+                setSpeaking(false);
+            }, [supported]);
+
+            const speak = useCallback((text) => {
+                if (!supported || !text) return;
+                window.speechSynthesis.cancel();
+                const u = new SpeechSynthesisUtterance(text.replace(/\n/g, '　'));
+                u.lang = 'ja-JP';
+                u.rate = 0.92;
+                u.pitch = 1.1;
+                const jaVoice = window.speechSynthesis.getVoices().find(v => v.lang && v.lang.startsWith('ja'));
+                if (jaVoice) u.voice = jaVoice;
+                u.onend = () => setSpeaking(false);
+                u.onerror = () => setSpeaking(false);
+                setSpeaking(true);
+                window.speechSynthesis.speak(u);
+            }, [supported]);
+
+            useEffect(() => () => { if (supported) window.speechSynthesis.cancel(); }, [supported]);
+
+            return { speak, stop, speaking, supported };
+        };
+
+        /* =====================================================================
+         * 7. めくり式ビューアー
+         * ===================================================================== */
+
+        const BookViewer = ({ story, userData, onMakeBmc, onRestart, onPrint, onSave, saved }) => {
+            const [index, setIndex] = useState(0);      // 0 = 表紙、1〜 = 本文
+            const [direction, setDirection] = useState('next');
+            const [flipKey, setFlipKey] = useState(0);
+            const { speak, stop, speaking, supported } = useSpeech();
+
+            const total = story.pages.length + 1;
+            const isCover = index === 0;
+            const page = isCover ? null : story.pages[index - 1];
+
+            const go = (delta) => {
+                const next = index + delta;
+                if (next < 0 || next >= total) return;
+                stop();
+                setDirection(delta > 0 ? 'next' : 'prev');
+                setFlipKey(k => k + 1);
+                setIndex(next);
+            };
+
+            useEffect(() => {
+                const onKey = (e) => {
+                    if (e.key === 'ArrowRight') go(1);
+                    if (e.key === 'ArrowLeft') go(-1);
+                };
+                window.addEventListener('keydown', onKey);
+                return () => window.removeEventListener('keydown', onKey);
+            });
+
+            const handleRead = () => {
+                if (speaking) { stop(); return; }
+                speak(isCover ? story.title : page.text);
+            };
+
+            return (
+                <div className="screen-only min-h-screen p-4 md:p-8 flex justify-center items-start">
+                    <div className="max-w-2xl w-full">
+                        <div className="bg-white rounded-3xl shadow-2xl overflow-hidden fade-in">
+                            <div className="bg-gray-800 text-white px-6 py-4 flex justify-between items-center gap-4">
+                                <div className="min-w-0">
+                                    <h2 className="text-lg font-bold flex items-center gap-2 truncate">
+                                        <Sparkles className="w-5 h-5 text-yellow-400 flex-shrink-0" />
+                                        <span className="truncate">{story.title}</span>
+                                    </h2>
+                                    <p className="text-gray-400 text-xs mt-0.5">
+                                        {isCover ? 'ひょうし' : `${index} / ${story.pages.length} ページ`}
+                                    </p>
+                                </div>
+                                {supported && (
+                                    <button
+                                        onClick={handleRead}
+                                        className={`flex-shrink-0 px-4 py-2 rounded-full font-bold text-sm flex items-center gap-2 transition ${
+                                            speaking ? 'bg-yellow-400 text-gray-900' : 'bg-white/10 hover:bg-white/20 text-white'
+                                        }`}
+                                    >
+                                        {speaking ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+                                        {speaking ? 'とめる' : 'よみあげ'}
+                                    </button>
+                                )}
+                            </div>
+
+                            <div
+                                key={flipKey}
+                                className={`bg-orange-50 p-6 md:p-8 ${direction === 'next' ? 'page-turn-next' : 'page-turn-prev'}`}
+                            >
+                                {isCover ? (
+                                    <div className="text-center">
+                                        {story.coverImage ? (
+                                            <img src={story.coverImage} alt="" className="w-full max-h-[46vh] object-contain rounded-2xl shadow-lg mb-6" />
+                                        ) : (
+                                            <div className="bg-white rounded-2xl h-48 flex items-center justify-center mb-6 border border-orange-100">
+                                                <Book className="w-16 h-16 text-orange-200" />
+                                            </div>
+                                        )}
+                                        <h1 className="text-2xl md:text-3xl font-black text-gray-800 leading-snug mb-3">{story.title}</h1>
+                                        <p className="text-gray-500">さく：{userData.name}{honorific(userData.gender)} と MirAI塾</p>
+                                    </div>
+                                ) : (
+                                    <div>
+                                        {page.image ? (
+                                            <img src={page.image} alt="" className="w-full max-h-[46vh] object-contain rounded-2xl shadow-lg mb-6" />
+                                        ) : story.imagesRequested ? (
+                                            <div className="bg-white rounded-2xl h-40 flex flex-col items-center justify-center mb-6 border border-orange-100 text-orange-300 text-sm gap-2">
+                                                <Book className="w-10 h-10" />
+                                                <span>このページの挿絵は作れませんでした</span>
+                                            </div>
+                                        ) : null}
+                                        <p className={`whitespace-pre-wrap leading-loose text-gray-700 font-medium text-lg md:text-xl ${speaking ? 'speaking-highlight' : ''}`}>
+                                            {page.text}
+                                        </p>
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="flex items-center justify-between gap-3 p-4 bg-white border-t border-gray-100">
+                                <button
+                                    onClick={() => go(-1)}
+                                    disabled={index === 0}
+                                    className="px-5 py-3 rounded-full font-bold flex items-center gap-1 disabled:opacity-30 bg-gray-100 hover:bg-gray-200 text-gray-700"
+                                >
+                                    <ChevronLeft className="w-5 h-5" /> まえ
+                                </button>
+
+                                <div className="flex gap-1.5">
+                                    {Array.from({ length: total }).map((_, i) => (
+                                        <button
+                                            key={i}
+                                            onClick={() => { stop(); setDirection(i > index ? 'next' : 'prev'); setFlipKey(k => k + 1); setIndex(i); }}
+                                            aria-label={`${i === 0 ? 'ひょうし' : `${i}ページ`}へ`}
+                                            className={`w-2.5 h-2.5 rounded-full transition ${i === index ? 'bg-blue-500 scale-125' : 'bg-gray-300 hover:bg-gray-400'}`}
+                                        />
+                                    ))}
+                                </div>
+
+                                <button
+                                    onClick={() => go(1)}
+                                    disabled={index === total - 1}
+                                    className="px-5 py-3 rounded-full font-bold flex items-center gap-1 disabled:opacity-30 bg-blue-500 hover:bg-blue-600 text-white"
+                                >
+                                    つぎ <ChevronRight className="w-5 h-5" />
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="mt-6 grid gap-3">
+                            <button
+                                onClick={onMakeBmc}
+                                className="w-full bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 hover:to-teal-600 text-white font-bold py-4 px-6 rounded-xl shadow-lg transform transition hover:-translate-y-1 flex items-center justify-center gap-2"
+                            >
+                                <Grid className="w-6 h-6" />
+                                この夢を「おしごと」にしてみる
+                            </button>
+                            <div className="flex gap-3">
+                                <button
+                                    onClick={onSave}
+                                    className={`flex-1 border-2 font-bold py-3 px-4 rounded-xl flex items-center justify-center gap-2 ${
+                                        saved
+                                            ? 'bg-green-50 border-green-200 text-green-600 hover:bg-green-100'
+                                            : 'bg-white border-gray-200 hover:bg-gray-50 text-gray-600'
+                                    }`}
+                                >
+                                    {saved ? <Check className="w-5 h-5" /> : <Save className="w-5 h-5" />}
+                                    {saved ? 'ほぞんずみ（上書き）' : 'ほぞんする'}
+                                </button>
+                                <button
+                                    onClick={onPrint}
+                                    className="flex-1 bg-white border-2 border-gray-200 hover:bg-gray-50 text-gray-600 font-bold py-3 px-4 rounded-xl flex items-center justify-center gap-2"
+                                >
+                                    <Printer className="w-5 h-5" /> 印刷・PDF保存
+                                </button>
+                                <button
+                                    onClick={onRestart}
+                                    className="px-5 text-gray-400 hover:text-gray-600 text-sm font-medium flex items-center justify-center gap-1"
+                                >
+                                    <RefreshCw className="w-4 h-4" /> さいしょから
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        /* =====================================================================
+         * 8. ビジネスモデルキャンバス（子ども向け起業教材）
+         * ===================================================================== */
+
+        const BmcCard = ({ block, items, className = '' }) => (
+            <div className={`border-2 rounded-2xl p-4 flex flex-col ${block.color} ${className}`}>
+                <h4 className="font-black text-sm leading-tight mb-0.5">{block.kid}</h4>
+                <p className="text-[10px] opacity-60 mb-2 tracking-wide">{block.formal}</p>
+                {items && items.length > 0 ? (
+                    <ul className="space-y-1.5 text-sm text-gray-700 flex-1">
+                        {items.map((it, i) => (
+                            <li key={i} className="bg-white/70 rounded-lg px-2.5 py-1.5 leading-snug">{it}</li>
+                        ))}
+                    </ul>
+                ) : (
+                    <p className="text-xs opacity-50 flex-1">{block.hint}</p>
+                )}
+            </div>
+        );
+
+        const BmcScreen = ({ bmc, result, userData, loading, error, onBack, onPrint, onRetry }) => {
+            const byKey = (k) => BMC_BLOCKS.find(b => b.key === k);
+            const items = (k) => (bmc ? bmc[k] : null);
+
+            if (loading) {
+                return (
+                    <div className="min-h-screen flex flex-col items-center justify-center p-4">
+                        <div className="text-center fade-in">
+                            <div className="bg-white p-6 rounded-full shadow-xl mx-auto w-32 h-32 flex items-center justify-center mb-6">
+                                <Grid className="w-16 h-16 text-emerald-500 animate-pulse" />
+                            </div>
+                            <h2 className="text-2xl font-bold text-gray-700 mb-2">おしごとに してみるよ...</h2>
+                            <p className="text-gray-500">「{result.job}」のビジネスを考えています</p>
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="min-h-screen p-4 md:p-8">
+                    <div className="max-w-5xl mx-auto screen-only">
+                        <div className="text-center mb-6 fade-in">
+                            <p className="text-gray-500 text-sm font-bold tracking-widest uppercase mb-2">ステップ 4：おしごとの せっけいず</p>
+                            <h1 className="text-2xl md:text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-emerald-600 to-teal-600 py-1">
+                                {result.job}
+                            </h1>
+                            <p className="text-gray-500 text-sm mt-1">{userData.name}{honorific(userData.gender)}のビジネスモデルキャンバス</p>
+                        </div>
+
+                        <ErrorBanner message={error} />
+
+                        {bmc?.summary && (
+                            <div className="bg-white border-2 border-emerald-100 rounded-2xl p-5 mb-6 text-center fade-in">
+                                <p className="text-gray-700 font-medium leading-relaxed">{bmc.summary}</p>
+                            </div>
+                        )}
+
+                        {/* 標準のビジネスモデルキャンバス配置（画面が狭いときは縦積み） */}
+                        <div className="hidden md:grid grid-cols-5 grid-rows-2 gap-3 mb-3" style={{ minHeight: '340px' }}>
+                            <BmcCard block={byKey('partners')}     items={items('partners')}     className="row-span-2" />
+                            <BmcCard block={byKey('activities')}   items={items('activities')} />
+                            <BmcCard block={byKey('value')}        items={items('value')}        className="row-span-2" />
+                            <BmcCard block={byKey('relationship')} items={items('relationship')} />
+                            <BmcCard block={byKey('customers')}    items={items('customers')}    className="row-span-2" />
+                            <BmcCard block={byKey('resources')}    items={items('resources')} />
+                            <BmcCard block={byKey('channels')}     items={items('channels')} />
+                        </div>
+                        <div className="hidden md:grid grid-cols-2 gap-3 mb-6">
+                            <BmcCard block={byKey('costs')}   items={items('costs')} />
+                            <BmcCard block={byKey('revenue')} items={items('revenue')} />
+                        </div>
+
+                        <div className="md:hidden grid gap-3 mb-6">
+                            {BMC_BLOCKS.map(b => <BmcCard key={b.key} block={b} items={items(b.key)} />)}
+                        </div>
+
+                        {bmc?.firstStep && (
+                            <div className="bg-gradient-to-r from-amber-100 to-orange-100 border-2 border-amber-200 rounded-2xl p-5 mb-6 fade-in">
+                                <h4 className="font-black text-amber-800 mb-1 flex items-center gap-2 text-sm">
+                                    <Sparkles className="w-4 h-4" /> あしたから できる 小さな一歩
+                                </h4>
+                                <p className="text-gray-700 font-medium">{bmc.firstStep}</p>
+                            </div>
+                        )}
+
+                        <div className="flex flex-col sm:flex-row gap-3">
+                            <button onClick={onBack} className="flex-1 bg-white border-2 border-gray-200 hover:bg-gray-50 text-gray-600 font-bold py-3 px-4 rounded-xl flex items-center justify-center gap-2">
+                                <Book className="w-5 h-5" /> 絵本にもどる
+                            </button>
+                            {error && (
+                                <button onClick={onRetry} className="flex-1 bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-3 px-4 rounded-xl flex items-center justify-center gap-2">
+                                    <RefreshCw className="w-5 h-5" /> もう一度つくる
+                                </button>
+                            )}
+                            <button onClick={onPrint} className="flex-1 bg-gray-800 hover:bg-gray-900 text-white font-bold py-3 px-4 rounded-xl flex items-center justify-center gap-2">
+                                <Printer className="w-5 h-5" /> 印刷・PDF保存
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        /* =====================================================================
+         * 9. 印刷 / PDF保存用のレイアウト（画面には出さない）
+         * ===================================================================== */
+
+        const PrintSheet = ({ story, bmc, result, userData }) => {
+            if (!story) return null;
+            return (
+                <div className="print-only">
+                    <div className="print-page">
+                        {story.coverImage && <img src={story.coverImage} alt="" />}
+                        <h1 style={{ fontSize: '28px', fontWeight: 900, marginBottom: '12px' }}>{story.title}</h1>
+                        <p style={{ color: '#666' }}>さく：{userData.name}{honorific(userData.gender)} と MirAI塾</p>
+                    </div>
+
+                    {story.pages.map((p, i) => (
+                        <div className="print-page" key={i}>
+                            {p.image && <img src={p.image} alt="" />}
+                            <p style={{ fontSize: '17px', lineHeight: 2, whiteSpace: 'pre-wrap', textAlign: 'left' }}>{p.text}</p>
+                            <p style={{ color: '#999', fontSize: '12px', marginTop: '10px' }}>{i + 1}</p>
+                        </div>
+                    ))}
+
+                    {bmc && (
+                        <div className="print-page">
+                            <h2 style={{ fontSize: '20px', fontWeight: 900, marginBottom: '4px' }}>{result.job}</h2>
+                            <p style={{ color: '#666', fontSize: '13px', marginBottom: '14px' }}>
+                                {userData.name}{honorific(userData.gender)}のビジネスモデルキャンバス
+                            </p>
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px', textAlign: 'left' }}>
+                                {BMC_BLOCKS.map(b => (
+                                    <div className="print-bmc-cell" key={b.key} style={{ border: '1px solid #cbd5e1', borderRadius: '8px', padding: '8px' }}>
+                                        <div style={{ fontWeight: 900, fontSize: '12px' }}>{b.kid}</div>
+                                        <div style={{ fontSize: '9px', color: '#94a3b8', marginBottom: '4px' }}>{b.formal}</div>
+                                        <ul style={{ fontSize: '11px', lineHeight: 1.6, paddingLeft: '14px', margin: 0 }}>
+                                            {(bmc[b.key] || []).map((it, i) => <li key={i}>{it}</li>)}
+                                        </ul>
+                                    </div>
+                                ))}
+                            </div>
+                            {bmc.firstStep && (
+                                <p style={{ marginTop: '14px', fontSize: '13px', textAlign: 'left' }}>
+                                    <strong>あしたから できる 小さな一歩：</strong>{bmc.firstStep}
+                                </p>
+                            )}
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        /* =====================================================================
+         * 10. 生成中の進捗表示
+         * ===================================================================== */
+
+        const GeneratingScreen = ({ progress }) => (
+            <div className="min-h-screen flex flex-col items-center justify-center p-4">
+                <div className="text-center fade-in max-w-sm w-full">
+                    <div className="mb-6 relative">
+                        <div className="absolute inset-0 bg-pink-200 rounded-full animate-ping opacity-20"></div>
+                        <div className="bg-white p-6 rounded-full shadow-xl relative z-10 mx-auto w-32 h-32 flex items-center justify-center">
+                            <Book className="w-16 h-16 text-pink-500 bounce" />
+                        </div>
+                    </div>
+                    <h2 className="text-2xl font-bold text-gray-700 mb-2">絵本を つくっています...</h2>
+                    <p className="text-gray-500 mb-6 h-6">{progress.label}</p>
+                    {progress.total > 0 && (
+                        <div className="bg-white rounded-full h-3 overflow-hidden shadow-inner">
+                            <div
+                                className="bg-gradient-to-r from-pink-400 to-orange-400 h-full transition-all duration-500"
+                                style={{ width: `${Math.round((progress.done / progress.total) * 100)}%` }}
+                            />
+                        </div>
+                    )}
+                    <p className="text-xs text-gray-400 mt-4">挿絵を1枚ずつ描いています。少し時間がかかります。</p>
+                </div>
+            </div>
+        );
+
+        /* =====================================================================
+         * 11. アプリ本体
+         * ===================================================================== */
+
+        const PAGE_COUNT = 10;
+        const IMAGE_CONCURRENCY = 3;
+
+        const QUESTIONS = [
+            { text: 'こんにちは！MirAI塾へようこそ。まずはあなたのお名前を教えてね！' },
+            { text: (name) => `${name}さんは、いま何歳かな？` },
+            { text: 'ありがとう！では最初の質問だよ。将来どんなことをしてみたい？どんな夢があるか教えて！' },
+            { text: '素敵だね！じゃあ、あなたが「大切にしていること」や「大好きなこと」は何かな？（例：優しくすること、冒険すること）' },
+            { text: '最後の質問！あなたが「得意なこと」や、人から褒められることは何？' },
+        ];
+
+        const App = () => {
+            const [step, setStep] = useState('intro');
+            const [qIndex, setQIndex] = useState(0);
+            const [userData, setUserData] = useState({ name: '', age: '', gender: 'other', answers: [] });
+            const [chatHistory, setChatHistory] = useState([]);
+            const [inputValue, setInputValue] = useState('');
+            const [result, setResult] = useState(null);
+            const [story, setStory] = useState(null);
+            const [bmc, setBmc] = useState(null);
+            const [bmcLoading, setBmcLoading] = useState(false);
+            const [bmcError, setBmcError] = useState('');
+            const [progress, setProgress] = useState({ label: '', done: 0, total: 0 });
+            const [notice, setNotice] = useState('');
+            const [settingsOpen, setSettingsOpen] = useState(false);
+            const [apiKey, setApiKey] = useState(loadKey);
+            const [models, setModels] = useState(() => loadModels() || { text: null, image: null, quality: DEFAULT_QUALITY });
+            const [savedBooks, setSavedBooks] = useState([]);
+            const [savedId, setSavedId] = useState(null);
+            const messagesEndRef = useRef(null);
+
+            const refreshSavedBooks = useCallback(async () => {
+                try {
+                    const all = await listBooks();
+                    all.sort((a, b) => b.savedAt - a.savedAt);
+                    setSavedBooks(all);
+                } catch (e) {
+                    // 保存領域が使えない環境（プライベートウィンドウ等）でも本体は動かす
+                    setSavedBooks([]);
+                }
+            }, []);
+
+            useEffect(() => { refreshSavedBooks(); }, [refreshSavedBooks]);
+
+            useEffect(() => {
+                if (step === 'diagnosis') messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+            }, [chatHistory, step]);
+
+            const handleSaveSettings = (key, m) => {
+                setApiKey(key);
+                setModels(m);
+                saveKey(key);
+                saveModels(m);
+            };
+
+            // 保存済みのモデルが無ければ、その場で解決して覚える
+            const ensureModels = async () => {
+                if (models.text) return models;
+                const resolved = await resolveModels(apiKey, models.quality || DEFAULT_QUALITY);
+                if (!resolved.text) throw new GeminiError('このキーで使えるテキスト生成モデルが見つかりませんでした');
+                const next = { text: resolved.text, image: resolved.image, quality: resolved.quality };
+                setModels(next);
+                saveModels(next);
+                return next;
+            };
+
+            /* --- 診断 --- */
+
+            const runDiagnosis = async (answers) => {
+                setStep('analyzing');
+                setNotice('');
+                let diagnosis = null;
+
+                if (apiKey) {
+                    try {
+                        const m = await ensureModels();
+                        diagnosis = await generateJson(apiKey, m.text, {
+                            prompt: buildDiagnosisPrompt({ ...userData, answers }),
+                            schema: DIAGNOSIS_SCHEMA,
+                        });
+                    } catch (e) {
+                        setNotice(`AI診断が使えなかったので、かんたん診断に切り替えました（${e.message}）`);
+                    }
+                }
+                if (!diagnosis) diagnosis = determineJobLocally(answers);
+
+                setResult(diagnosis);
+                setStep('suggestion');
+            };
+
+            const handleInputSubmit = (e) => {
+                e.preventDefault();
+                if (!inputValue.trim()) return;
+
+                const current = inputValue.trim();
+                const newHistory = [...chatHistory, { type: 'user', text: current }];
+                setChatHistory(newHistory);
+                setInputValue('');
+
+                setTimeout(() => {
+                    if (qIndex === 0) {
+                        setUserData(prev => ({ ...prev, name: current }));
+                        setChatHistory([...newHistory, { type: 'bot', text: QUESTIONS[1].text(current) }]);
+                        setQIndex(1);
+                    } else if (qIndex === 1) {
+                        setUserData(prev => ({ ...prev, age: current }));
+                        setChatHistory([...newHistory, { type: 'bot', text: QUESTIONS[2].text }]);
+                        setQIndex(2);
+                    } else if (qIndex < 4) {
+                        setUserData(prev => ({ ...prev, answers: [...prev.answers, current] }));
+                        setChatHistory([...newHistory, { type: 'bot', text: QUESTIONS[qIndex + 1].text }]);
+                        setQIndex(qIndex + 1);
+                    } else {
+                        const answers = [...userData.answers, current];
+                        setUserData(prev => ({ ...prev, answers }));
+                        runDiagnosis(answers);
+                    }
+                }, 600);
+            };
+
+            /* --- 絵本づくり（ここがコピペを不要にしている部分） --- */
+
+            const generateBook = async () => {
+                if (!result) return;
+                setNotice('');
+                setSavedId(null);
+                setStep('generating');
+
+                if (!apiKey) {
+                    setStory(buildLocalStory(userData, result));
+                    setStep('book');
+                    return;
+                }
+
+                try {
+                    setProgress({ label: 'お話を考えています', done: 0, total: 0 });
+                    const m = await ensureModels();
+
+                    const raw = await generateJson(apiKey, m.text, {
+                        prompt: buildStoryPrompt(userData, result, PAGE_COUNT),
+                        schema: STORY_SCHEMA,
+                    });
+
+                    const built = {
+                        title: raw.title,
+                        characterLook: raw.characterLook,
+                        artStyle: raw.artStyle,
+                        imagesRequested: true,
+                        coverImage: null,
+                        pages: (raw.pages || []).map(p => ({ text: p.text, scene: p.scene, image: null })),
+                    };
+
+                    if (!built.pages.length) throw new GeminiError('お話のページが作れませんでした');
+
+                    if (!m.image) {
+                        built.imagesRequested = false;
+                        setStory(built);
+                        setStep('book');
+                        setNotice('挿絵に使えるモデルが見つからなかったため、文章だけの絵本になりました。');
+                        return;
+                    }
+
+                    const draw = (opts) => generateImage(apiKey, m.image, opts);
+
+                    // 挿絵の作り方（全ページで主人公の見た目をそろえるため）：
+                    //   1. キャラクター設定画（三面図）を1枚描く。表には出さず、基準としてだけ使う
+                    //   2. 1ページめを設定画つきで描く。これが画風の基準になる
+                    //   3. 残りは「設定画＋1ページめ」を見せて、同時に数枚ずつ描く
+                    const total = built.pages.length + 1;
+                    let done = 0;
+                    const tick = () => {
+                        done += 1;
+                        setProgress({ label: `挿絵を描いています（${done} / ${total}）`, done, total });
+                    };
+
+                    setProgress({ label: '主人公の姿を決めています', done: 0, total });
+
+                    let sheet = null;
+                    try {
+                        sheet = await draw({
+                            prompt: buildCharacterSheetPrompt(built),
+                            aspectRatio: '1:1',
+                        });
+                    } catch (e) {
+                        setNotice(`主人公の設定画が描けなかったため、ページごとに描き分けます（${e.message}）`);
+                    }
+                    tick();
+
+                    const drawPage = (i, refs) => draw({
+                        prompt: buildPageImagePrompt(built, built.pages[i], i, built.pages.length),
+                        referenceImages: refs,
+                        aspectRatio: '4:3',
+                    });
+
+                    const baseRefs = sheet ? [sheet] : [];
+                    let failed = 0;
+                    let firstPage = null;
+
+                    try {
+                        firstPage = await drawPage(0, baseRefs);
+                        built.pages[0].image = toDataUrl(firstPage);
+                        built.coverImage = built.pages[0].image;   // 表紙は1ページめの絵を使う
+                    } catch (e) {
+                        failed += 1;
+                    }
+                    tick();
+
+                    const restRefs = firstPage ? [...baseRefs, firstPage] : baseRefs;
+                    const restIndexes = built.pages.map((_, i) => i).slice(1);
+                    await mapWithConcurrency(restIndexes, IMAGE_CONCURRENCY, async (i) => {
+                        try {
+                            const img = await drawPage(i, restRefs);
+                            built.pages[i].image = toDataUrl(img);
+                        } catch (e) {
+                            failed += 1;
+                        }
+                        tick();
+                    });
+
+                    if (failed > 0) setNotice(`${failed}ページ分の挿絵が作れませんでした。文章はそのまま読めます。`);
+
+                    setStory(built);
+                    setStep('book');
+                } catch (e) {
+                    setNotice(`AIでの絵本づくりに失敗したため、ひな形のお話にしました（${e.message}）`);
+                    setStory(buildLocalStory(userData, result));
+                    setStep('book');
+                }
+            };
+
+            /* --- ビジネスモデルキャンバス --- */
+
+            const generateBmc = async () => {
+                setStep('bmc');
+                setBmcError('');
+
+                if (!apiKey) {
+                    setBmc(null);
+                    setBmcError('APIキーを設定すると、AIがこの夢を「おしごと」に広げます。右上の設定から登録してください。');
+                    return;
+                }
+
+                setBmcLoading(true);
+                try {
+                    const m = await ensureModels();
+                    const data = await generateJson(apiKey, m.text, {
+                        prompt: buildBmcPrompt(userData, result, story),
+                        schema: BMC_SCHEMA,
+                    });
+                    setBmc(data);
+                } catch (e) {
+                    setBmc(null);
+                    setBmcError(`うまく作れませんでした（${e.message}）`);
+                } finally {
+                    setBmcLoading(false);
+                }
+            };
+
+            const handleRestart = () => window.location.reload();
+            const handlePrint = () => window.print();
+
+            const handleSaveBook = async () => {
+                if (!story) return;
+                const id = savedId || `book-${Date.now()}`;
+                try {
+                    await saveBook({ id, savedAt: Date.now(), title: story.title, userData, result, story, bmc });
+                    setSavedId(id);
+                    await refreshSavedBooks();
+                } catch (e) {
+                    setNotice(`保存できませんでした（${e?.message || e}）`);
+                }
+            };
+
+            const handleOpenBook = (book) => {
+                setUserData(book.userData);
+                setResult(book.result);
+                setStory(book.story);
+                setBmc(book.bmc || null);
+                setSavedId(book.id);
+                setNotice('');
+                setStep('book');
+            };
+
+            const handleDeleteBook = async (id) => {
+                try {
+                    await removeBook(id);
+                    if (savedId === id) setSavedId(null);
+                    await refreshSavedBooks();
+                } catch (e) {
+                    setNotice(`削除できませんでした（${e?.message || e}）`);
+                }
+            };
+
+            const settingsButton = (
+                <button
+                    onClick={() => setSettingsOpen(true)}
+                    className="fixed top-4 right-4 z-30 bg-white/90 hover:bg-white shadow-md border border-gray-200 rounded-full p-3 text-gray-500 hover:text-blue-500 screen-only"
+                    aria-label="APIキーの設定"
+                    title="APIキーの設定"
+                >
+                    <Settings className="w-5 h-5" />
+                </button>
+            );
+
+            const shell = (children) => (
+                <React.Fragment>
+                    {settingsButton}
+                    <SettingsModal
+                        open={settingsOpen}
+                        onClose={() => setSettingsOpen(false)}
+                        apiKey={apiKey}
+                        models={models}
+                        onSave={handleSaveSettings}
+                    />
+                    {children}
+                    <PrintSheet story={story} bmc={bmc} result={result} userData={userData} />
+                </React.Fragment>
+            );
+
+            /* --- 画面 --- */
+
+            if (step === 'intro') {
+                return shell(
+                    <div className="min-h-screen flex items-center justify-center p-4 screen-only">
+                        <div className="bg-white max-w-xl w-full rounded-3xl p-8 book-shadow text-center fade-in">
+                            <div className="flex justify-center mb-6">
+                                <div className="bg-yellow-100 p-4 rounded-full bounce">
+                                    <Book className="w-16 h-16 text-yellow-600" />
+                                </div>
+                            </div>
+                            <h1 className="text-3xl font-bold text-gray-800 mb-2">MirAI塾</h1>
+                            <h2 className="text-xl font-bold text-blue-500 mb-6">夢の職業絵本メーカー</h2>
+                            <p className="text-gray-600 mb-6 leading-relaxed">
+                                あなたの夢や好きなことを教えてください。<br />
+                                AIがぴったりの職業を見つけて、<br />
+                                挿絵つきの絵本まで、その場で作ります！
+                            </p>
+
+                            <div className="mb-6">
+                                <p className="text-sm text-gray-500 mb-2">あなたの性別を教えてね（絵本の主人公になるよ）</p>
+                                <div className="flex justify-center gap-3 flex-wrap">
+                                    {[
+                                        { v: 'boy',   label: '男の子',   on: 'bg-blue-100 border-blue-500 text-blue-700' },
+                                        { v: 'girl',  label: '女の子',   on: 'bg-pink-100 border-pink-500 text-pink-700' },
+                                        { v: 'other', label: 'そのほか', on: 'bg-green-100 border-green-500 text-green-700' },
+                                    ].map(o => (
+                                        <button
+                                            key={o.v}
+                                            onClick={() => setUserData(prev => ({ ...prev, gender: o.v }))}
+                                            className={`px-4 py-2 rounded-full border-2 ${userData.gender === o.v ? o.on : 'border-gray-200 text-gray-400'}`}
+                                        >{o.label}</button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            <div className={`rounded-xl p-3 mb-6 text-sm border-2 ${apiKey ? 'bg-green-50 border-green-200 text-green-700' : 'bg-amber-50 border-amber-200 text-amber-700'}`}>
+                                {apiKey ? (
+                                    <span className="flex items-center justify-center gap-2">
+                                        <Check className="w-4 h-4" />挿絵つき{PAGE_COUNT}ページの絵本が作れます
+                                    </span>
+                                ) : (
+                                    <button onClick={() => setSettingsOpen(true)} className="flex items-center justify-center gap-2 w-full font-bold">
+                                        <Key className="w-4 h-4" />
+                                        Gemini APIキーを設定すると、挿絵つきの絵本が作れます
+                                    </button>
+                                )}
+                            </div>
+
+                            {savedBooks.length > 0 && (
+                                <div className="mb-6 text-left">
+                                    <p className="text-xs font-bold text-gray-400 tracking-widest uppercase mb-2">ほぞんした絵本</p>
+                                    <ul className="space-y-2 max-h-48 overflow-y-auto">
+                                        {savedBooks.map(b => (
+                                            <li key={b.id} className="flex items-center gap-2">
+                                                <button
+                                                    onClick={() => handleOpenBook(b)}
+                                                    className="flex-1 min-w-0 text-left bg-white border-2 border-gray-200 hover:border-blue-300 hover:bg-blue-50 rounded-xl px-3 py-2"
+                                                >
+                                                    <span className="block font-bold text-sm text-gray-800 truncate">{b.title}</span>
+                                                    <span className="block text-[11px] text-gray-400">
+                                                        {b.userData?.name}{honorific(b.userData?.gender)} ・ {new Date(b.savedAt).toLocaleDateString('ja-JP')}
+                                                    </span>
+                                                </button>
+                                                <button
+                                                    onClick={() => handleDeleteBook(b.id)}
+                                                    aria-label="この絵本をけす"
+                                                    className="flex-shrink-0 text-gray-300 hover:text-red-500 p-2"
+                                                >
+                                                    <Trash className="w-4 h-4" />
+                                                </button>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                </div>
+                            )}
+
+                            <button
+                                onClick={() => { setStep('diagnosis'); setChatHistory([{ type: 'bot', text: QUESTIONS[0].text }]); }}
+                                className="bg-blue-500 hover:bg-blue-600 text-white font-bold py-4 px-10 rounded-full text-lg shadow-lg transform transition hover:scale-105 flex items-center justify-center mx-auto gap-2"
+                            >
+                                <Sparkles className="w-5 h-5" />
+                                スタート！
+                            </button>
+                        </div>
+                    </div>
+                );
+            }
+
+            if (step === 'diagnosis') {
+                return shell(
+                    <div className="min-h-screen flex flex-col items-center p-4 max-w-xl mx-auto screen-only">
+                        <div className="w-full bg-white rounded-t-3xl shadow-lg flex-1 flex flex-col overflow-hidden h-[80vh]">
+                            <div className="bg-blue-100 p-4 text-center border-b border-blue-200">
+                                <h3 className="font-bold text-blue-800">ステップ 1：夢職業診断</h3>
+                            </div>
+
+                            <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-gray-50">
+                                {chatHistory.map((msg, idx) => (
+                                    <div key={idx} className={`flex ${msg.type === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                        <div className={`max-w-[80%] p-4 rounded-2xl ${
+                                            msg.type === 'user'
+                                                ? 'bg-blue-500 text-white rounded-tr-none'
+                                                : 'bg-white text-gray-800 border border-gray-200 rounded-tl-none shadow-sm'
+                                        }`}>
+                                            {msg.text}
+                                        </div>
+                                    </div>
+                                ))}
+                                <div ref={messagesEndRef} />
+                            </div>
+
+                            <form onSubmit={handleInputSubmit} className="p-4 bg-white border-t border-gray-100">
+                                <div className="flex gap-2 items-center">
+                                    <input
+                                        type="text"
+                                        value={inputValue}
+                                        onChange={(e) => setInputValue(e.target.value)}
+                                        placeholder="ここに入力してね..."
+                                        className="flex-1 min-w-0 border-2 border-gray-200 rounded-full px-4 py-3 focus:outline-none focus:border-blue-400 transition"
+                                        autoFocus
+                                    />
+                                    <button
+                                        type="submit"
+                                        disabled={!inputValue.trim()}
+                                        className="flex-shrink-0 bg-blue-500 text-white px-8 sm:px-14 py-3 rounded-full hover:bg-blue-600 disabled:bg-gray-300 transition font-bold whitespace-nowrap flex items-center gap-2 shadow-md"
+                                    >
+                                        <span>送信</span>
+                                        <Send className="w-5 h-5" />
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                );
+            }
+
+            if (step === 'analyzing') {
+                return shell(
+                    <div className="min-h-screen flex flex-col items-center justify-center p-4 screen-only">
+                        <div className="text-center fade-in">
+                            <div className="mb-6 relative">
+                                <div className="absolute inset-0 bg-blue-200 rounded-full animate-ping opacity-20"></div>
+                                <div className="bg-white p-6 rounded-full shadow-xl relative z-10 mx-auto w-32 h-32 flex items-center justify-center">
+                                    <RefreshCw className="w-16 h-16 text-blue-500 animate-spin" />
+                                </div>
+                            </div>
+                            <h2 className="text-2xl font-bold text-gray-700 mb-2">診断中...</h2>
+                            <p className="text-gray-500">あなたの夢のかけらを集めています</p>
+                        </div>
+                    </div>
+                );
+            }
+
+            if (step === 'suggestion' && result) {
+                return shell(
+                    <div className="min-h-screen flex items-center justify-center p-4 screen-only">
+                        <div className="bg-white max-w-xl w-full rounded-3xl p-8 book-shadow fade-in text-center relative overflow-hidden">
+                            <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-pink-400 via-yellow-400 to-blue-400"></div>
+
+                            <h3 className="text-gray-500 font-bold mb-4 uppercase tracking-widest text-sm">ステップ 2：職業提案</h3>
+
+                            <ErrorBanner message={notice} onClose={() => setNotice('')} />
+
+                            <div className="bg-blue-50 p-4 rounded-xl mb-4 text-left">
+                                <h4 className="font-bold text-blue-700 mb-2 flex items-center gap-2 text-sm">
+                                    <Heart className="w-4 h-4" /> {userData.name}さんの特徴
+                                </h4>
+                                <p className="text-gray-700 text-sm leading-relaxed">{result.features}</p>
+                            </div>
+
+                            {result.strengths?.length > 0 && (
+                                <div className="flex flex-wrap gap-2 justify-center mb-4">
+                                    {result.strengths.map((s, i) => (
+                                        <span key={i} className="bg-white border-2 border-blue-100 text-blue-600 text-xs font-bold rounded-full px-3 py-1">{s}</span>
+                                    ))}
+                                </div>
+                            )}
+
+                            <p className="text-gray-500 text-sm mb-2">そんなあなたにおすすめの職業は…</p>
+                            <h1 className="text-3xl sm:text-4xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-purple-600 mb-4 py-2 leading-tight">
+                                {result.job}
+                            </h1>
+
+                            <div className="bg-yellow-50 p-5 rounded-xl border-2 border-yellow-100 mb-6 text-left">
+                                <h4 className="font-bold text-yellow-700 mb-2 flex items-center gap-2 text-sm">
+                                    <Award className="w-4 h-4" /> どんなお仕事？
+                                </h4>
+                                <p className="text-gray-700 font-medium">{result.description}</p>
+                            </div>
+
+                            <button
+                                onClick={generateBook}
+                                className="w-full bg-gradient-to-r from-pink-500 to-orange-400 hover:from-pink-600 hover:to-orange-500 text-white font-bold py-4 px-6 rounded-xl shadow-lg transform transition hover:-translate-y-1 flex items-center justify-center gap-2"
+                            >
+                                <Book className="w-6 h-6" />
+                                {apiKey ? '挿絵つきの絵本を作る！' : '絵本のストーリーを作る！'}
+                            </button>
+                        </div>
+                    </div>
+                );
+            }
+
+            if (step === 'generating') {
+                return shell(<div className="screen-only"><GeneratingScreen progress={progress} /></div>);
+            }
+
+            if (step === 'book' && story) {
+                return shell(
+                    <React.Fragment>
+                        {notice && (
+                            <div className="max-w-2xl mx-auto px-4 pt-6 screen-only">
+                                <ErrorBanner message={notice} onClose={() => setNotice('')} />
+                            </div>
+                        )}
+                        <BookViewer
+                            story={story}
+                            userData={userData}
+                            onMakeBmc={generateBmc}
+                            onRestart={handleRestart}
+                            onPrint={handlePrint}
+                            onSave={handleSaveBook}
+                            saved={!!savedId}
+                        />
+                    </React.Fragment>
+                );
+            }
+
+            if (step === 'bmc' && result) {
+                return shell(
+                    <div className="screen-only">
+                        <BmcScreen
+                            bmc={bmc}
+                            result={result}
+                            userData={userData}
+                            loading={bmcLoading}
+                            error={bmcError}
+                            onBack={() => setStep('book')}
+                            onPrint={handlePrint}
+                            onRetry={generateBmc}
+                        />
+                    </div>
+                );
+            }
+
+            return shell(null);
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
