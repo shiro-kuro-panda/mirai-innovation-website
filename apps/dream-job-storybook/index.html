@@ -118,11 +118,22 @@
             'gemini-2.5-pro',
             'gemini-2.0-flash',
         ];
-        const IMAGE_MODEL_PREFS = [
-            'gemini-3.1-flash-lite-image',   // Nano Banana 2 Lite
-            'gemini-2.5-flash-image',        // Nano Banana
-            'gemini-2.0-flash-preview-image-generation',
-        ];
+        // 画像モデルは画質重視／速度重視の2系統。上から順に、キーで実際に使えるものを採用する。
+        // gpt-image-2 はブラウザから直接呼べない（OpenAI APIがCORSヘッダーを返さない）ため、
+        // 既定は Nano Banana Pro。OpenAI を使う場合は下の IMAGE_PROVIDERS を参照。
+        const IMAGE_MODEL_PREFS = {
+            high: [
+                'gemini-3-pro-image',            // Nano Banana Pro：2K/4K、人物の同一性保持が最も強い
+                'gemini-3.1-flash-lite-image',
+                'gemini-2.5-flash-image',
+            ],
+            fast: [
+                'gemini-3.1-flash-lite-image',   // Nano Banana 2 Lite：速くて安い
+                'gemini-2.5-flash-image',
+                'gemini-3-pro-image',
+            ],
+        };
+        const DEFAULT_QUALITY = 'high';
 
         const loadKey = () => {
             try { return localStorage.getItem(KEY_STORAGE) || ''; } catch (e) { return ''; }
@@ -189,12 +200,14 @@
         };
 
         // 使うモデルを解決する（画像モデルが1つも無ければ image: null を返す）
-        const resolveModels = async (apiKey) => {
+        const resolveModels = async (apiKey, quality = DEFAULT_QUALITY) => {
             const available = await listModels(apiKey);
             const isImage = (n) => n.includes('image') && !n.includes('embedding');
+            const prefs = IMAGE_MODEL_PREFS[quality] || IMAGE_MODEL_PREFS.high;
             return {
                 text: pickModel(TEXT_MODEL_PREFS, available, (n) => n.includes('flash') && !isImage(n)),
-                image: pickModel(IMAGE_MODEL_PREFS, available, isImage),
+                image: pickModel(prefs, available, isImage),
+                quality,
                 available,
             };
         };
@@ -231,13 +244,14 @@
         // 画像生成。referenceImages を渡すとキャラクターの見た目を引き継げる。
         // generationConfig の対応可否はモデルによって差があるため、
         // 400 が返ったら設定を削りながら段階的に再試行する。
-        const generateImage = async (apiKey, model, { prompt, referenceImages = [], aspectRatio = '4:3' }) => {
+        const generateImage = async (apiKey, model, { prompt, referenceImages = [], aspectRatio = '4:3', imageSize = '2K' }) => {
             const parts = [{ text: prompt }];
             referenceImages.forEach(img => {
                 parts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });
             });
 
             const variants = [
+                { responseModalities: ['TEXT', 'IMAGE'], imageConfig: { aspectRatio, imageSize } },
                 { responseModalities: ['TEXT', 'IMAGE'], imageConfig: { aspectRatio } },
                 { responseModalities: ['TEXT', 'IMAGE'] },
                 null,
@@ -269,6 +283,71 @@
         };
 
         const toDataUrl = (img) => img ? `data:${img.mimeType};base64,${img.data}` : null;
+
+        /* ---------------------------------------------------------------------
+         * 挿絵の生成元（プロバイダ）
+         *
+         *  gemini : ブラウザから直接 Gemini API を呼ぶ（既定）
+         *  openai : gpt-image-2 を使う。OpenAI API は CORS ヘッダーを返さないため
+         *           ブラウザから直接は呼べない。proxy/ 配下の関数をデプロイし、
+         *           その URL を設定画面に入れて経由させる。
+         * ------------------------------------------------------------------- */
+
+        const IMAGE_PROVIDERS = {
+            gemini: { label: 'Gemini（直接）', note: 'サーバー不要。そのまま使えます' },
+            openai: { label: 'gpt-image-2（プロキシ経由）', note: 'proxy/ をデプロイし、そのURLが必要です' },
+        };
+
+        // プロキシに投げる形。OpenAI 側の細かいリクエスト形式はプロキシが受け持つので、
+        // 仕様が変わってもサーバー側の1ファイルを直せば済む。
+        const generateImageViaProxy = async (proxy, { prompt, referenceImages = [], aspectRatio = '4:3' }) => {
+            if (!proxy?.url) throw new GeminiError('プロキシのURLが設定されていません');
+
+            const headers = { 'Content-Type': 'application/json' };
+            if (proxy.token) headers['x-proxy-token'] = proxy.token;
+
+            const res = await fetch(proxy.url, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({
+                    prompt,
+                    aspectRatio,
+                    images: referenceImages.map(i => ({ mimeType: i.mimeType, data: i.data })),
+                }),
+            });
+            if (!res.ok) {
+                let detail = '';
+                try { detail = (await res.json())?.error || ''; } catch (e) { /* noop */ }
+                throw new GeminiError(detail || `プロキシがHTTP ${res.status}を返しました`, res.status);
+            }
+            const body = await res.json();
+            if (!body?.data) throw new GeminiError('プロキシから画像が返りませんでした');
+            return { mimeType: body.mimeType || 'image/png', data: body.data };
+        };
+
+        // 設定に応じて呼び分ける。呼び出し側はどちらを使うか意識しなくてよい。
+        const makeImageDrawer = ({ provider, apiKey, model, proxy }) => (opts) => (
+            provider === 'openai'
+                ? generateImageViaProxy(proxy, opts)
+                : generateImage(apiKey, model, opts)
+        );
+
+        // 同時実行数を制限しながら順不同で処理する。
+        // 10ページを1枚ずつ順番に描くと待ち時間が長すぎるが、
+        // 無制限に並列化するとレート制限に当たるため上限を設ける。
+        const mapWithConcurrency = async (items, limit, fn) => {
+            const results = new Array(items.length);
+            let cursor = 0;
+            const worker = async () => {
+                while (true) {
+                    const i = cursor++;
+                    if (i >= items.length) return;
+                    results[i] = await fn(items[i], i);
+                }
+            };
+            await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+            return results;
+        };
 
         /* =====================================================================
          * 3. プロンプトとスキーマ
@@ -329,9 +408,27 @@ ${SAFETY_NOTE}
             required: ['title', 'characterLook', 'artStyle', 'pages'],
         };
 
+        // 10ページ分のページ割り。何も指示しないと10ページが冗長になるため、
+        // 1ページ＝1つの出来事になるよう役割を固定する。
+        const PAGE_BEATS = [
+            '主人公の紹介。好きなこと・いつもしていることが伝わる日常の場面',
+            '「これが好き」という気持ちがはっきりする出来事',
+            'その道でがんばっている人や物に出会い、あこがれる',
+            '自分もやってみようと、はじめの一歩をふみ出す',
+            'うまくいって、うれしくなる小さな成功',
+            '大きな壁にぶつかる。うまくいかない',
+            'できないかもしれないと落ちこむ',
+            '得意なことを思い出し、自分のやり方でやってみる',
+            '乗りこえて、まわりの人が笑顔になる。職業として花ひらく',
+            '読んでいる子へのメッセージで終わる',
+        ];
+
         const buildStoryPrompt = (userData, result, pageCount) => {
             const genderLabel = userData.gender === 'boy' ? '男の子' : (userData.gender === 'girl' ? '女の子' : '子ども');
             const [dream, values, skill] = userData.answers;
+            const beats = PAGE_BEATS.slice(0, pageCount)
+                .map((b, i) => `  ${i + 1}ページめ：${b}`).join('\n');
+
             return `${userData.name}（${userData.age}歳・${genderLabel}）が主人公の絵本を作ってください。
 
 主人公の設定：
@@ -340,43 +437,59 @@ ${SAFETY_NOTE}
 - 得意なこと：${skill}
 - 将来なる職業：「${result.job}」（${result.description}）
 
+全${pageCount}ページ。各ページの役割は次のとおりです。
+${beats}
+
 物語の条件：
-- 全${pageCount}ページ。起承転結があり、最後は読んだ子が「自分にもできそう」と思える終わり方にする
-- 途中で1度、主人公がつまずく場面を入れる。それを「${skill}」という得意なことで乗りこえる
+- 1ページに出来事は1つだけ。次のページへ気持ちがつながるように書く
+- つまずきは「${skill}」という得意なことで乗りこえる
 - 各ページの text は2〜4文。声に出して読んで気持ちよいリズムにする
 - 主人公の呼び方は本文中で一貫させる
 
 出力する項目：
 - title: 絵本のタイトル（20文字以内）
-- characterLook: 主人公の見た目を、挿絵を描く人に伝えるつもりで具体的に書く（髪型・髪色・服の色と形・体型・表情の癖など）。全ページで同じ姿にするための設定なので、固有の特徴を必ず含める
-- artStyle: 絵本全体の画風（例：やわらかい水彩、明るいパステル調 など）を1文で
-- pages: 各ページの text（本文）と scene（そのページの挿絵に描く情景を、背景・主人公の動作・時間帯・感情がわかるように1〜2文で）
+- characterLook: 主人公の見た目を、挿絵を描く人に伝えるつもりで具体的に書く。
+  髪型・髪色・目の色・服の形と色・靴・体型・いつも持っているもの・表情の癖を必ず入れる。
+  全${pageCount}ページで同じ姿にするための設定なので、他の子と間違えようのない特徴を含める
+- artStyle: 絵本全体の画風を1文で。画材（水彩・色鉛筆など）、色の傾向、線の太さにふれる
+- pages: 各ページの text（本文）と scene（挿絵に描く情景を、
+  場所・時間帯・主人公の動作と表情・まわりに何があるかがわかるように1〜2文で）
 
 ${SAFETY_NOTE}`;
         };
 
-        const buildCharacterSheetPrompt = (story) => `絵本の主人公キャラクターの設定画を1枚描いてください。
+        const buildCharacterSheetPrompt = (story) => `絵本の主人公の「キャラクター設定画」を1枚描いてください。
 
 キャラクター：${story.characterLook}
 画風：${story.artStyle}
 
 条件：
-- 全身が入った立ち姿、正面向き、にっこり笑った表情
-- 背景は無地の白。文字・ロゴ・枠線は一切入れない
-- 子ども向け絵本の挿絵の画風で、やわらかく親しみやすく
-- 実在の人物の写真的な描写にはせず、絵本のキャラクターとして描く`;
+- 同じ1人のキャラクターを、横に並べて3つの姿で描く：
+  (1) 正面の全身、まっすぐ立ってにっこり笑った顔
+  (2) 横向きの全身
+  (3) 顔のアップ（バストアップ）
+- 3つとも髪型・髪色・目の色・服・靴をまったく同じにする
+- 背景は無地の白。文字・ロゴ・枠線・番号は一切入れない
+- 子ども向け絵本の挿絵の画風で、やわらかく親しみやすい線と色
+- 実在の人物の写真的な描写にはせず、絵本のキャラクターとして描く
 
-        const buildPageImagePrompt = (story, page, index, total) => `添付した画像のキャラクターを主人公として、絵本の挿絵を1枚描いてください。
-主人公の顔・髪型・髪色・服装は、添付画像とまったく同じにしてください。
+これは以降の全ページで見た目をそろえるための基準画です。特徴がはっきり見えるように描いてください。`;
+
+        const buildPageImagePrompt = (story, page, index, total) => `絵本の挿絵を1枚描いてください。
+
+添付した1枚目は主人公のキャラクター設定画です。主人公の顔立ち・髪型・髪色・目の色・服・靴を、
+設定画とまったく同じにしてください。2枚目がある場合は、その絵の画風・色づかい・線の太さに合わせてください。
 
 絵本のタイトル：${story.title}
-このページ（${index + 1}/${total}）で描く場面：${page.scene}
+このページ（${index + 1}/${total}）の場面：${page.scene}
 画風：${story.artStyle}
 
 条件：
-- 場面全体がわかる挿絵にする（背景もきちんと描く）
-- 文字・セリフ・吹き出し・ページ番号は画像に入れない
-- 子ども向け絵本の挿絵として、明るく安心感のある色づかいにする`;
+- 場面全体が伝わる一枚絵にする。背景・時間帯・天気まで描きこむ
+- 主人公の表情と動作で、そのページの気持ちが伝わるようにする
+- 文字・セリフ・吹き出し・ページ番号・枠線は画像に入れない
+- 見開きの絵本として印刷しても耐えるよう、細部まで丁寧に仕上げる
+- 明るく安心感のある色づかいにする`;
 
         // --- ビジネスモデルキャンバス（子ども向け起業教材版） ---
         // 9ブロックの並びは標準のBMCレイアウトに合わせている。
@@ -484,12 +597,16 @@ ${SAFETY_NOTE}`;
                 artStyle: '',
                 offline: true,
                 pages: [
-                    { text: `昔々あるところに、${userData.age}歳の元気な${kid}、${name}${s}がいました。\n${name}${s}は「${values}」ことが大好きでした。`, scene: '' },
-                    { text: `${name}${s}は、いつか「${result.job}」になることを夢見ていました。`, scene: '' },
-                    { text: `ある日、${name}${s}の前に大きな壁が立ちはだかりました。\n「わたしにできるかな…」不安になる${name}${s}。`, scene: '' },
-                    { text: `でも、${name}${s}には特別な力がありました。\nそれは得意な「${skill}」という才能です。`, scene: '' },
-                    { text: `${name}${s}は勇気を出して一歩踏み出しました。\n「${result.job}」として、周りの人を笑顔に変えていったのです。\n「ありがとう、${name}${s}！」みんなの声が響き渡ります。`, scene: '' },
-                    { text: `${name}${s}へ。\nあなたにも、こんな未来が待っているかもね！\n信じていれば、夢はきっと叶うよ。`, scene: '' },
+                    { text: `むかしむかし、あるところに ${userData.age}歳の元気な${kid}、${name}${s}がいました。`, scene: '' },
+                    { text: `${name}${s}は「${values}」ことが 大すきでした。`, scene: '' },
+                    { text: `ある日、${name}${s}は「${result.job}」という おしごとを 知りました。\n「すてきだなあ」`, scene: '' },
+                    { text: `${name}${s}は、いつか「${result.job}」に なることを 夢見るように なりました。`, scene: '' },
+                    { text: `さっそく やってみると、思ったより うまくいきました。\nうれしくて、もっと やりたくなりました。`, scene: '' },
+                    { text: `でも ある日、${name}${s}の前に 大きなかべが 立ちはだかりました。`, scene: '' },
+                    { text: `「わたしには むりかもしれない…」\n${name}${s}は しょんぼりしました。`, scene: '' },
+                    { text: `そのとき、${name}${s}は 思い出しました。\n自分には「${skill}」という とくいなことが あることを。`, scene: '' },
+                    { text: `${name}${s}は 自分のやりかたで かべを のりこえました。\n「ありがとう、${name}${s}！」みんなの こえが ひびきます。`, scene: '' },
+                    { text: `${name}${s}へ。\nあなたの すきなことは、きっと だれかを しあわせにするよ。`, scene: '' },
                 ],
             };
         };
@@ -534,9 +651,10 @@ ${SAFETY_NOTE}`;
                 setChecking(true);
                 setError('');
                 try {
-                    const resolved = await resolveModels(draftKey.trim());
+                    const quality = draftModels.quality || DEFAULT_QUALITY;
+                    const resolved = await resolveModels(draftKey.trim(), quality);
                     setAvailable(resolved.available);
-                    setDraftModels({ text: resolved.text, image: resolved.image });
+                    setDraftModels({ text: resolved.text, image: resolved.image, quality });
                     if (!resolved.text) setError('このキーで使えるテキスト生成モデルが見つかりませんでした。');
                 } catch (e) {
                     setAvailable(null);
@@ -578,6 +696,79 @@ ${SAFETY_NOTE}`;
                         />
                         <p className="text-xs text-gray-500 mb-4">
                             キーは <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" className="text-blue-600 underline">Google AI Studio</a> で無料で作成できます。
+                        </p>
+
+                        <label className="block text-sm font-bold text-gray-700 mb-1">挿絵の生成元</label>
+                        <div className="grid grid-cols-2 gap-2 mb-2">
+                            {Object.entries(IMAGE_PROVIDERS).map(([v, o]) => (
+                                <button
+                                    key={v}
+                                    onClick={() => setDraftModels(m => ({ ...m, provider: v }))}
+                                    className={`border-2 rounded-xl px-3 py-2 text-left ${
+                                        (draftModels.provider || 'gemini') === v
+                                            ? 'bg-blue-50 border-blue-400'
+                                            : 'border-gray-200 hover:bg-gray-50'
+                                    }`}
+                                >
+                                    <span className="block font-bold text-sm text-gray-800">{o.label}</span>
+                                    <span className="block text-[11px] text-gray-500 leading-snug mt-0.5">{o.note}</span>
+                                </button>
+                            ))}
+                        </div>
+
+                        {(draftModels.provider || 'gemini') === 'openai' ? (
+                            <div className="bg-amber-50 border-2 border-amber-200 rounded-xl p-3 mb-4">
+                                <p className="text-xs text-amber-800 mb-2 leading-relaxed">
+                                    OpenAI API はブラウザからの直接呼び出しを許可していない（CORSヘッダーを返さない）ため、
+                                    <code className="bg-white px-1 rounded">proxy/openai-image.js</code> をデプロイして、そのURLを入れてください。
+                                    OpenAIのキーはプロキシ側の環境変数に置くので、この端末には保存されません。
+                                </p>
+                                <input
+                                    type="url"
+                                    value={draftModels.proxyUrl || ''}
+                                    onChange={(e) => setDraftModels(m => ({ ...m, proxyUrl: e.target.value }))}
+                                    placeholder="https://example.vercel.app/api/openai-image"
+                                    className="w-full border-2 border-amber-200 rounded-lg px-3 py-2 mb-2 text-sm focus:outline-none focus:border-amber-400"
+                                />
+                                <input
+                                    type="password"
+                                    value={draftModels.proxyToken || ''}
+                                    onChange={(e) => setDraftModels(m => ({ ...m, proxyToken: e.target.value }))}
+                                    placeholder="合言葉（プロキシに PROXY_TOKEN を設定した場合）"
+                                    autoComplete="off"
+                                    className="w-full border-2 border-amber-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-amber-400"
+                                />
+                                <p className="text-[11px] text-amber-700 mt-2">
+                                    文章の生成には引き続き Gemini のキーを使います。
+                                </p>
+                            </div>
+                        ) : null}
+
+                        <label className="block text-sm font-bold text-gray-700 mb-1">挿絵の画質</label>
+                        <div className="grid grid-cols-2 gap-2 mb-2">
+                            {[
+                                { v: 'high', label: '高画質', note: 'Nano Banana Pro。人物の同一性が最も安定します' },
+                                { v: 'fast', label: '速度優先', note: 'Nano Banana 2 Lite。速くて安く仕上がります' },
+                            ].map(o => (
+                                <button
+                                    key={o.v}
+                                    onClick={() => setDraftModels(m => ({ ...m, quality: o.v }))}
+                                    className={`border-2 rounded-xl px-3 py-2 text-left ${
+                                        (draftModels.quality || DEFAULT_QUALITY) === o.v
+                                            ? 'bg-blue-50 border-blue-400'
+                                            : 'border-gray-200 hover:bg-gray-50'
+                                    }`}
+                                >
+                                    <span className="block font-bold text-sm text-gray-800">{o.label}</span>
+                                    <span className="block text-[11px] text-gray-500 leading-snug mt-0.5">{o.note}</span>
+                                </button>
+                            ))}
+                        </div>
+                        <p className="text-xs text-gray-500 mb-4">
+                            絵本1冊につき挿絵を{PAGE_COUNT + 1}枚生成します（設定画1枚＋本文{PAGE_COUNT}ページ）。
+                            {(draftModels.provider || 'gemini') === 'openai'
+                                ? '画質の設定はGeminiで描くときにだけ使われます。'
+                                : '高画質は1枚あたりの単価が上がるため、教室でまとめて使う場合は利用上限の設定をおすすめします。'}
                         </p>
 
                         <button
@@ -626,7 +817,7 @@ ${SAFETY_NOTE}`;
                             </button>
                             {apiKey && (
                                 <button
-                                    onClick={() => { onSave('', { text: null, image: null }); onClose(); }}
+                                    onClick={() => { onSave('', { text: null, image: null, quality: DEFAULT_QUALITY }); onClose(); }}
                                     className="px-4 border-2 border-red-200 text-red-500 font-bold py-3 rounded-xl hover:bg-red-50"
                                 >
                                     削除
@@ -1019,7 +1210,8 @@ ${SAFETY_NOTE}`;
          * 11. アプリ本体
          * ===================================================================== */
 
-        const PAGE_COUNT = 6;
+        const PAGE_COUNT = 10;
+        const IMAGE_CONCURRENCY = 3;
 
         const QUESTIONS = [
             { text: 'こんにちは！MirAI塾へようこそ。まずはあなたのお名前を教えてね！' },
@@ -1044,7 +1236,10 @@ ${SAFETY_NOTE}`;
             const [notice, setNotice] = useState('');
             const [settingsOpen, setSettingsOpen] = useState(false);
             const [apiKey, setApiKey] = useState(loadKey);
-            const [models, setModels] = useState(() => loadModels() || { text: null, image: null });
+            const [models, setModels] = useState(() => loadModels() || {
+                text: null, image: null, quality: DEFAULT_QUALITY,
+                provider: 'gemini', proxyUrl: '', proxyToken: '',
+            });
             const messagesEndRef = useRef(null);
 
             useEffect(() => {
@@ -1061,9 +1256,9 @@ ${SAFETY_NOTE}`;
             // 保存済みのモデルが無ければ、その場で解決して覚える
             const ensureModels = async () => {
                 if (models.text) return models;
-                const resolved = await resolveModels(apiKey);
+                const resolved = await resolveModels(apiKey, models.quality || DEFAULT_QUALITY);
                 if (!resolved.text) throw new GeminiError('このキーで使えるテキスト生成モデルが見つかりませんでした');
-                const next = { text: resolved.text, image: resolved.image };
+                const next = { text: resolved.text, image: resolved.image, quality: resolved.quality };
                 setModels(next);
                 saveModels(next);
                 return next;
@@ -1149,52 +1344,83 @@ ${SAFETY_NOTE}`;
                         title: raw.title,
                         characterLook: raw.characterLook,
                         artStyle: raw.artStyle,
-                        imagesRequested: !!m.image,
+                        imagesRequested: true,
                         coverImage: null,
                         pages: (raw.pages || []).map(p => ({ text: p.text, scene: p.scene, image: null })),
                     };
 
                     if (!built.pages.length) throw new GeminiError('お話のページが作れませんでした');
 
-                    if (!m.image) {
+                    const provider = models.provider || 'gemini';
+                    const proxy = { url: models.proxyUrl, token: models.proxyToken };
+                    const canDrawImages = provider === 'openai' ? !!proxy.url : !!m.image;
+
+                    if (!canDrawImages) {
+                        built.imagesRequested = false;
                         setStory(built);
                         setStep('book');
-                        setNotice('挿絵に使えるモデルが見つからなかったため、文章だけの絵本になりました。');
+                        setNotice(provider === 'openai'
+                            ? 'プロキシのURLが未設定のため、文章だけの絵本になりました。'
+                            : '挿絵に使えるモデルが見つからなかったため、文章だけの絵本になりました。');
                         return;
                     }
 
-                    const total = built.pages.length + 1;
-                    setProgress({ label: '主人公の姿を描いています', done: 0, total });
+                    const draw = makeImageDrawer({ provider, apiKey, model: m.image, proxy });
 
-                    // 先に主人公の設定画を1枚描き、以降のページはこれを見せて描かせる。
-                    // これで全ページの顔・髪・服がそろう。
+                    // 挿絵の作り方（全ページで主人公の見た目をそろえるため）：
+                    //   1. キャラクター設定画（三面図）を1枚描く。表には出さず、基準としてだけ使う
+                    //   2. 1ページめを設定画つきで描く。これが画風の基準になる
+                    //   3. 残りは「設定画＋1ページめ」を見せて、同時に数枚ずつ描く
+                    const total = built.pages.length + 1;
+                    let done = 0;
+                    const tick = () => {
+                        done += 1;
+                        setProgress({ label: `挿絵を描いています（${done} / ${total}）`, done, total });
+                    };
+
+                    setProgress({ label: '主人公の姿を決めています', done: 0, total });
+
                     let sheet = null;
                     try {
-                        sheet = await generateImage(apiKey, m.image, {
+                        sheet = await draw({
                             prompt: buildCharacterSheetPrompt(built),
                             aspectRatio: '1:1',
                         });
-                        built.coverImage = toDataUrl(sheet);
                     } catch (e) {
-                        setNotice(`主人公の絵が描けなかったため、ページごとに描き分けます（${e.message}）`);
+                        setNotice(`主人公の設定画が描けなかったため、ページごとに描き分けます（${e.message}）`);
                     }
-                    setProgress({ label: '主人公の姿を描いています', done: 1, total });
+                    tick();
 
+                    const drawPage = (i, refs) => draw({
+                        prompt: buildPageImagePrompt(built, built.pages[i], i, built.pages.length),
+                        referenceImages: refs,
+                        aspectRatio: '4:3',
+                    });
+
+                    const baseRefs = sheet ? [sheet] : [];
                     let failed = 0;
-                    for (let i = 0; i < built.pages.length; i++) {
-                        setProgress({ label: `${i + 1}ページめの挿絵を描いています`, done: i + 1, total });
+                    let firstPage = null;
+
+                    try {
+                        firstPage = await drawPage(0, baseRefs);
+                        built.pages[0].image = toDataUrl(firstPage);
+                        built.coverImage = built.pages[0].image;   // 表紙は1ページめの絵を使う
+                    } catch (e) {
+                        failed += 1;
+                    }
+                    tick();
+
+                    const restRefs = firstPage ? [...baseRefs, firstPage] : baseRefs;
+                    const restIndexes = built.pages.map((_, i) => i).slice(1);
+                    await mapWithConcurrency(restIndexes, IMAGE_CONCURRENCY, async (i) => {
                         try {
-                            const img = await generateImage(apiKey, m.image, {
-                                prompt: buildPageImagePrompt(built, built.pages[i], i, built.pages.length),
-                                referenceImages: sheet ? [sheet] : [],
-                                aspectRatio: '4:3',
-                            });
+                            const img = await drawPage(i, restRefs);
                             built.pages[i].image = toDataUrl(img);
                         } catch (e) {
                             failed += 1;
                         }
-                        setProgress({ label: `${i + 1}ページめの挿絵を描いています`, done: i + 2, total });
-                    }
+                        tick();
+                    });
 
                     if (failed > 0) setNotice(`${failed}ページ分の挿絵が作れませんでした。文章はそのまま読めます。`);
 
@@ -1234,6 +1460,11 @@ ${SAFETY_NOTE}`;
                     setBmcLoading(false);
                 }
             };
+
+            // 挿絵つきで作れるか（OpenAI経路ではプロキシURLも要る）
+            const imagesReady = !!apiKey && (
+                (models.provider || 'gemini') === 'openai' ? !!models.proxyUrl : true
+            );
 
             const handleRestart = () => window.location.reload();
             const handlePrint = () => window.print();
@@ -1300,12 +1531,15 @@ ${SAFETY_NOTE}`;
                                 </div>
                             </div>
 
-                            <div className={`rounded-xl p-3 mb-6 text-sm border-2 ${apiKey ? 'bg-green-50 border-green-200 text-green-700' : 'bg-amber-50 border-amber-200 text-amber-700'}`}>
-                                {apiKey ? (
-                                    <span className="flex items-center justify-center gap-2"><Check className="w-4 h-4" />挿絵つきの絵本が作れます</span>
+                            <div className={`rounded-xl p-3 mb-6 text-sm border-2 ${imagesReady ? 'bg-green-50 border-green-200 text-green-700' : 'bg-amber-50 border-amber-200 text-amber-700'}`}>
+                                {imagesReady ? (
+                                    <span className="flex items-center justify-center gap-2">
+                                        <Check className="w-4 h-4" />挿絵つき{PAGE_COUNT}ページの絵本が作れます
+                                    </span>
                                 ) : (
                                     <button onClick={() => setSettingsOpen(true)} className="flex items-center justify-center gap-2 w-full font-bold">
-                                        <Key className="w-4 h-4" />Gemini APIキーを設定すると、挿絵つきの絵本が作れます
+                                        <Key className="w-4 h-4" />
+                                        {apiKey ? 'プロキシのURLを設定すると、挿絵つきの絵本が作れます' : 'Gemini APIキーを設定すると、挿絵つきの絵本が作れます'}
                                     </button>
                                 )}
                             </div>
@@ -1429,7 +1663,7 @@ ${SAFETY_NOTE}`;
                                 className="w-full bg-gradient-to-r from-pink-500 to-orange-400 hover:from-pink-600 hover:to-orange-500 text-white font-bold py-4 px-6 rounded-xl shadow-lg transform transition hover:-translate-y-1 flex items-center justify-center gap-2"
                             >
                                 <Book className="w-6 h-6" />
-                                {apiKey ? '挿絵つきの絵本を作る！' : '絵本のストーリーを作る！'}
+                                {imagesReady ? '挿絵つきの絵本を作る！' : '絵本のストーリーを作る！'}
                             </button>
                         </div>
                     </div>
